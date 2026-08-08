@@ -1,0 +1,4 @@
+{
+  "psc-riskiq-api": { "path": "C:\\Works\\SourceCode\\psc-riskiq-app", "language": "csharp" },
+  "psc-riskiq-ui": { "path": "C:\\Works\\SourceCode\\psc-riskiq-app\\ui\\psc-riskiq-ng-app", "language": "typescript" }
+}

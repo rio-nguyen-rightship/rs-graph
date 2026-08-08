@@ -1,0 +1,29 @@
+{
+  "name": "@rs-graph/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "rs-graph": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "clean": "rimraf dist *.tsbuildinfo",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@rs-graph/core-schema": "0.1.0",
+    "@rs-graph/graph-store": "0.1.0",
+    "@rs-graph/indexer-typescript": "0.1.0",
+    "@rs-graph/mcp-server": "0.1.0",
+    "chokidar": "^5.0.0",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}

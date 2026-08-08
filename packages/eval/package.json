@@ -1,0 +1,22 @@
+{
+  "name": "@rs-graph/eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "clean": "rimraf dist *.tsbuildinfo",
+    "eval": "node dist/runEval.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@rs-graph/graph-store": "0.1.0",
+    "@rs-graph/mcp-server": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.2"
+  }
+}

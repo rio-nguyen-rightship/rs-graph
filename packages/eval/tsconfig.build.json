@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/*.test.ts"],
+  "references": [{ "path": "../graph-store/tsconfig.build.json" }, { "path": "../mcp-server/tsconfig.build.json" }]
+}

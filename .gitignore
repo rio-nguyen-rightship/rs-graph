@@ -1,0 +1,35 @@
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# rs-graph output — contains extracted source structure/signatures, treat as sensitive as the source itself
+.rs-graph/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# .NET
+bin/
+obj/
+*.user
+
+# Python
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# eval harness — machine-local repo paths and raw run output, never for commit
+packages/eval/repos.config.json
+packages/eval/results/

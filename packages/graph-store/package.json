@@ -1,0 +1,27 @@
+{
+  "name": "@rs-graph/graph-store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "clean": "rimraf dist *.tsbuildinfo",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rs-graph/core-schema": "0.1.0",
+    "better-sqlite3": "^13.0.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.2",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}

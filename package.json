@@ -1,0 +1,24 @@
+{
+  "name": "rs-graph",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Turn a codebase into a queryable graph and serve it to coding agents over MCP.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}

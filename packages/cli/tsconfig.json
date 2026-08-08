@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "references": [
+    { "path": "../core-schema" },
+    { "path": "../graph-store" },
+    { "path": "../indexer-typescript" },
+    { "path": "../mcp-server" }
+  ],
+  "include": ["src"]
+}

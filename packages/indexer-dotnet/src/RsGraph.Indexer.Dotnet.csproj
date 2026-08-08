@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ExcludeAssets="runtime": we only need Microsoft.Build's API surface at compile time.
+         At runtime, MSBuildLocator.RegisterDefaults() points assembly resolution at the
+         actual MSBuild toolset bundled with the installed .NET SDK instead — shipping our own
+         copy alongside it would risk a version conflict. -->
+    <PackageReference Include="Microsoft.Build" Version="18.8.2" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.Build.Locator" Version="1.11.2" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
+  </ItemGroup>
+
+</Project>
