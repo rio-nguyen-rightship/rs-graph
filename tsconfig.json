@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/core-schema/tsconfig.build.json" },
     { "path": "packages/graph-store/tsconfig.build.json" },
+    { "path": "packages/workspace-store/tsconfig.build.json" },
     { "path": "packages/cli/tsconfig.build.json" },
     { "path": "packages/indexer-typescript/tsconfig.build.json" },
     { "path": "packages/mcp-server/tsconfig.build.json" },

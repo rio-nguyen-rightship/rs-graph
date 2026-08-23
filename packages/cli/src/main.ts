@@ -3,7 +3,10 @@ import { Command } from "commander";
 import * as path from "node:path";
 import { runInit } from "./commands/init.js";
 import { runIndex } from "./commands/indexRepo.js";
+import { runIndexWorkspace } from "./commands/indexWorkspace.js";
+import { installHook, installHookWorkspace } from "./commands/installHook.js";
 import { runServe } from "./commands/serve.js";
+import { runServeWorkspace } from "./commands/serveWorkspace.js";
 import { runWatch } from "./commands/watch.js";
 
 const program = new Command();
@@ -31,10 +34,39 @@ program
   );
 
 program
+  .command("index-workspace")
+  .description("Index every repo listed in a workspace.json (see docs/mcp-tools.md), reporting a pass/skip/fail summary")
+  .argument("<workspaceConfig>", "path to a workspace.json file")
+  .option("--fresh", "delete any existing .rs-graph/graph.db first, for every repo in the workspace")
+  .action((workspaceConfig: string, opts: { fresh?: boolean }) =>
+    runIndexWorkspace(path.resolve(workspaceConfig), { fresh: opts.fresh }),
+  );
+
+program
   .command("serve")
   .description("Start the MCP server for a repo's graph over stdio")
   .argument("[path]", "target repo path", ".")
   .action((targetPath: string) => runServe(path.resolve(targetPath)));
+
+program
+  .command("serve-workspace")
+  .description("Start the MCP server exposing cross-repo tools for a workspace.json's repos over stdio")
+  .argument("<workspaceConfig>", "path to a workspace.json file")
+  .action((workspaceConfig: string) => runServeWorkspace(path.resolve(workspaceConfig)));
+
+program
+  .command("install-hook")
+  .description(
+    "Install a git post-merge hook that re-indexes this repo in the background after `git pull` (see docs/mcp-tools.md)",
+  )
+  .argument("[path]", "target repo path", ".")
+  .action((targetPath: string) => installHook(path.resolve(targetPath)));
+
+program
+  .command("install-hook-workspace")
+  .description("Install the post-merge hook into every repo listed in a workspace.json")
+  .argument("<workspaceConfig>", "path to a workspace.json file")
+  .action((workspaceConfig: string) => installHookWorkspace(path.resolve(workspaceConfig)));
 
 program
   .command("watch")

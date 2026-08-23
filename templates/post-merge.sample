@@ -1,0 +1,22 @@
+#!/bin/sh
+# rs-graph post-merge hook — re-indexes this repo's graph after `git pull`/merge, so the MCP
+# tools stay current without a manual `rs-graph index` step.
+#
+# Runs the actual (re)index detached in the background and always exits 0: a full re-index
+# re-scans/re-compiles the whole repo (there's no per-file incremental re-parse yet — only the
+# database write is content-hash-keyed and skips unchanged files, see graph-store's ingest.ts),
+# so it can take far longer than is reasonable to block a pull on. A slow or failing reindex must
+# never look like a failed pull. Check .rs-graph/post-merge.log if the graph seems stale.
+#
+# Install: run `rs-graph install-hook` (or `rs-graph install-hook-workspace <workspace.json>` for
+# every repo in a workspace at once) — see docs/mcp-tools.md. Or install manually: copy this file
+# to .githooks/post-merge, `chmod +x` it, and run `git config core.hooksPath .githooks`.
+
+command -v rs-graph >/dev/null 2>&1 || exit 0
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+mkdir -p "$repo_root/.rs-graph" 2>/dev/null
+
+nohup rs-graph index "$repo_root" >>"$repo_root/.rs-graph/post-merge.log" 2>&1 &
+
+exit 0

@@ -1,0 +1,6 @@
+{
+  "repos": [
+    { "name": "producer-api", "path": "./producer-api" },
+    { "name": "consumer-api", "path": "./consumer-api" }
+  ]
+}

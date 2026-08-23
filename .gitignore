@@ -33,3 +33,9 @@ Thumbs.db
 # eval harness — machine-local repo paths and raw run output, never for commit
 packages/eval/repos.config.json
 packages/eval/results/
+
+# test fixtures are re-indexed by the test suite on every run, which (unlike a real target repo,
+# where committing these is the point) regenerates these as throwaway artifacts each time —
+# occasionally left behind by a vitest worker-teardown race across parallel test files
+fixtures/**/.mcp.json
+fixtures/**/.githooks/

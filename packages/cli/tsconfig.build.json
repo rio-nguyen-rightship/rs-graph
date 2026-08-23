@@ -5,6 +5,7 @@
     { "path": "../core-schema/tsconfig.build.json" },
     { "path": "../graph-store/tsconfig.build.json" },
     { "path": "../indexer-typescript/tsconfig.build.json" },
-    { "path": "../mcp-server/tsconfig.build.json" }
+    { "path": "../mcp-server/tsconfig.build.json" },
+    { "path": "../workspace-store/tsconfig.build.json" }
   ]
 }

@@ -64,6 +64,8 @@ public sealed class SymbolGraphBuilder(string repoRoot, NdjsonWriter writer, Ext
         // functions, lambdas, and top-level Program.cs statements alike, with one code path.
         EmitCallEdges(relPath, root, semanticModel);
         EmitDiRegistrations(relPath, root, semanticModel);
+        EmitMessagingEdges(relPath, root, semanticModel);
+        EmitSignalREdges(relPath, root, semanticModel);
     }
 
     private void EmitType(
@@ -202,7 +204,7 @@ public sealed class SymbolGraphBuilder(string repoRoot, NdjsonWriter writer, Ext
 
     private void EmitRoute(string relPath, IMethodSymbol method, string methodId, string verb, string routeTemplate)
     {
-        var routeId = $"csharp:route:{methodId}";
+        var routeId = RouteUtils.BuildRouteId(verb, RouteUtils.NormalizeTemplate(routeTemplate));
         if (!TryClaim(routeId)) return;
 
         var location = method.Locations.FirstOrDefault(l => l.IsInSource);
@@ -299,7 +301,55 @@ public sealed class SymbolGraphBuilder(string repoRoot, NdjsonWriter writer, Ext
                 Line = lineSpan.StartLinePosition.Line + 1,
                 Col = lineSpan.StartLinePosition.Character + 1,
             });
+
+            if (GetRouteUrlTemplate(targetSymbol) is { } routeUrlTemplate)
+            {
+                writer.Write(new EdgeRecord
+                {
+                    EdgeType = "INVOKES_ROUTE",
+                    From = fromId,
+                    To = RouteUtils.BuildCrossRepoRouteKey(RouteUtils.NormalizeTemplate(routeUrlTemplate)),
+                    Line = lineSpan.StartLinePosition.Line + 1,
+                    Col = lineSpan.StartLinePosition.Character + 1,
+                });
+            }
         }
+    }
+
+    /// <summary>Returns the path template from a [RouteUrl("...")] attribute — RightShip.ApiClient's
+    /// NSwag-generated marker for "this client method proxies an HTTP call to this route" — checking
+    /// both the method itself and, if it's a concrete implementation, the interface member it
+    /// implements. NSwag emits the attribute on the generated interface; calling code commonly holds
+    /// the client through that interface (constructor-injected, matching this codebase's general DI
+    /// style), but checking the concrete method directly too costs nothing and covers the rest.</summary>
+    private static string? GetRouteUrlTemplate(IMethodSymbol method)
+    {
+        if (GetRouteUrlAttributeTemplate(method) is { } direct) return direct;
+
+        if (method.ContainingType is not { TypeKind: TypeKind.Class } containingType) return null;
+        foreach (var iface in containingType.AllInterfaces)
+        {
+            foreach (var ifaceMember in iface.GetMembers().OfType<IMethodSymbol>())
+            {
+                if (!SymbolEqualityComparer.Default.Equals(
+                        containingType.FindImplementationForInterfaceMember(ifaceMember), method))
+                {
+                    continue;
+                }
+                if (GetRouteUrlAttributeTemplate(ifaceMember) is { } viaInterface) return viaInterface;
+            }
+        }
+        return null;
+    }
+
+    private static string? GetRouteUrlAttributeTemplate(IMethodSymbol method)
+    {
+        foreach (var attr in method.GetAttributes())
+        {
+            if (attr.AttributeClass?.Name != "RouteUrlAttribute") continue;
+            if (attr.ConstructorArguments.FirstOrDefault().Value is string template) return template;
+        }
+        return null;
     }
 
     private void EmitDiRegistrations(string relPath, SyntaxNode root, SemanticModel semanticModel)
@@ -348,6 +398,179 @@ public sealed class SymbolGraphBuilder(string repoRoot, NdjsonWriter writer, Ext
         }
     }
 
+    /// <summary>Extracts cross-repo/cross-language Service Bus messaging edges: a producer call
+    /// shaped like this org's internal `IMessageQueueService.EnqueueMessage(new T{...})` wrapper
+    /// over MassTransit, and a consumer class implementing MassTransit's own `IConsumer&lt;T&gt;`.
+    /// Both edge kinds target the same normalized `xrepo:message:{TypeName}` key regardless of
+    /// whether T is a locally-declared, resolvable class — see MessageUtils and PublishesEdge/
+    /// ConsumesEdge in core-schema for why the key is always name-based rather than a real
+    /// Symbol id.</summary>
+    private void EmitMessagingEdges(string relPath, SyntaxNode root, SemanticModel semanticModel)
+    {
+        foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+        {
+            if (invocation.Expression is not MemberAccessExpressionSyntax { Name.Identifier.Text: "EnqueueMessage" }) continue;
+            if (invocation.ArgumentList.Arguments.Count == 0) continue;
+
+            var messageType = invocation.ArgumentList.Arguments[0].Expression switch
+            {
+                ObjectCreationExpressionSyntax creation => semanticModel.GetTypeInfo(creation).Type,
+                _ => null,
+            };
+            if (messageType is null) continue;
+
+            if (semanticModel.GetEnclosingSymbol(invocation.SpanStart) is not IMethodSymbol containingMethod) continue;
+            if (containingMethod.Locations.All(l => !l.IsInSource)) continue;
+
+            var messageKey = MessageUtils.BuildMessageKey(messageType.Name);
+            var lineSpan = invocation.GetLocation().GetLineSpan();
+            EmitMessageContractSymbol(messageKey, messageType.Name, relPath, lineSpan);
+            writer.Write(new EdgeRecord
+            {
+                EdgeType = "PUBLISHES",
+                From = SymbolUtils.BuildSymbolId(containingMethod),
+                To = messageKey,
+                Line = lineSpan.StartLinePosition.Line + 1,
+                Col = lineSpan.StartLinePosition.Character + 1,
+            });
+        }
+
+        foreach (var typeDecl in root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>())
+        {
+            if (semanticModel.GetDeclaredSymbol(typeDecl) is not INamedTypeSymbol typeSymbol) continue;
+
+            foreach (var iface in typeSymbol.AllInterfaces)
+            {
+                if (iface is not { Name: "IConsumer", TypeArguments.Length: 1 }) continue;
+
+                var messageType = iface.TypeArguments[0];
+                var messageKey = MessageUtils.BuildMessageKey(messageType.Name);
+                var lineSpan = typeDecl.GetLocation().GetLineSpan();
+                EmitMessageContractSymbol(messageKey, messageType.Name, relPath, lineSpan);
+                writer.Write(new EdgeRecord
+                {
+                    EdgeType = "CONSUMES",
+                    From = SymbolUtils.BuildSymbolId(typeSymbol),
+                    To = messageKey,
+                    Line = lineSpan.StartLinePosition.Line + 1,
+                    Col = lineSpan.StartLinePosition.Character + 1,
+                });
+            }
+        }
+    }
+
+    private void EmitMessageContractSymbol(string messageKey, string typeName, string relPath, FileLinePositionSpan lineSpan)
+    {
+        if (!TryClaim(messageKey)) return; // already emitted from an earlier publisher/consumer of the same type
+
+        writer.Write(new SymbolRecord
+        {
+            Id = messageKey,
+            Name = typeName,
+            Kind = "MessageContract",
+            Signature = typeName,
+            FilePath = relPath,
+            StartLine = lineSpan.StartLinePosition.Line + 1,
+            EndLine = lineSpan.StartLinePosition.Line + 1,
+            Modifiers = [],
+            External = false,
+        });
+        writer.Write(new EdgeRecord { EdgeType = "DEFINES", From = relPath, To = messageKey });
+    }
+
+    /// <summary>Extracts cross-repo/cross-language SignalR edges: a broadcast call shaped like
+    /// Genesis.SignalR's `ISignalService.Send("eventName", data)`/`SendToGroups(...)` (matched by
+    /// method name + a receiver whose type name contains "SignalService", to avoid matching every
+    /// unrelated `Send(...)` call in a codebase), and a class implementing `ISignalHubInterceptor`
+    /// whose `InterceptorName` carries the dispatch name a client's `.invoke(...)` call routes to.
+    /// Both target the normalized `xrepo:signal:{name}` key regardless of local resolvability —
+    /// see SignalUtils and the messaging edges above for why.</summary>
+    private void EmitSignalREdges(string relPath, SyntaxNode root, SemanticModel semanticModel)
+    {
+        foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+        {
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess) continue;
+            if (memberAccess.Name.Identifier.Text is not ("Send" or "SendToGroups")) continue;
+
+            var receiverType = semanticModel.GetTypeInfo(memberAccess.Expression).Type;
+            if (receiverType is null || !receiverType.Name.Contains("SignalService", StringComparison.Ordinal)) continue;
+
+            var firstArg = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
+            if (firstArg is not LiteralExpressionSyntax { Token.Value: string eventName }) continue;
+
+            if (semanticModel.GetEnclosingSymbol(invocation.SpanStart) is not IMethodSymbol containingMethod) continue;
+            if (containingMethod.Locations.All(l => !l.IsInSource)) continue;
+
+            var signalKey = SignalUtils.BuildSignalKey(eventName);
+            var lineSpan = invocation.GetLocation().GetLineSpan();
+            EmitHubEventSymbol(signalKey, eventName, relPath, lineSpan);
+            writer.Write(new EdgeRecord
+            {
+                EdgeType = "PUBLISHES",
+                From = SymbolUtils.BuildSymbolId(containingMethod),
+                To = signalKey,
+                Line = lineSpan.StartLinePosition.Line + 1,
+                Col = lineSpan.StartLinePosition.Character + 1,
+            });
+        }
+
+        foreach (var typeDecl in root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>())
+        {
+            if (semanticModel.GetDeclaredSymbol(typeDecl) is not INamedTypeSymbol typeSymbol) continue;
+            if (!typeSymbol.AllInterfaces.Any(i => i.Name == "ISignalHubInterceptor")) continue;
+
+            foreach (var member in typeSymbol.GetMembers("InterceptorName"))
+            {
+                var interceptorName = FindFirstStringLiteral(member);
+                if (interceptorName is null) continue;
+
+                var signalKey = SignalUtils.BuildSignalKey(interceptorName);
+                var lineSpan = typeDecl.GetLocation().GetLineSpan();
+                EmitHubEventSymbol(signalKey, interceptorName, relPath, lineSpan);
+                writer.Write(new EdgeRecord
+                {
+                    EdgeType = "CONSUMES",
+                    From = SymbolUtils.BuildSymbolId(typeSymbol),
+                    To = signalKey,
+                    Line = lineSpan.StartLinePosition.Line + 1,
+                    Col = lineSpan.StartLinePosition.Character + 1,
+                });
+            }
+        }
+    }
+
+    private static string? FindFirstStringLiteral(ISymbol member)
+    {
+        foreach (var syntaxRef in member.DeclaringSyntaxReferences)
+        {
+            var literal = syntaxRef.GetSyntax()
+                .DescendantNodesAndSelf()
+                .OfType<LiteralExpressionSyntax>()
+                .FirstOrDefault(l => l.Token.Value is string);
+            if (literal is not null) return (string)literal.Token.Value!;
+        }
+        return null;
+    }
+
+    private void EmitHubEventSymbol(string signalKey, string name, string relPath, FileLinePositionSpan lineSpan)
+    {
+        if (!TryClaim(signalKey)) return; // already emitted from an earlier publisher/consumer of the same event
+
+        writer.Write(new SymbolRecord
+        {
+            Id = signalKey,
+            Name = name,
+            Kind = "HubEvent",
+            Signature = name,
+            FilePath = relPath,
+            StartLine = lineSpan.StartLinePosition.Line + 1,
+            EndLine = lineSpan.StartLinePosition.Line + 1,
+            Modifiers = [],
+            External = false,
+        });
+        writer.Write(new EdgeRecord { EdgeType = "DEFINES", From = relPath, To = signalKey });
+    }
+
     private void EmitEdgeToPossiblyExternal(string edgeType, string fromId, ISymbol toSymbol)
     {
         writer.Write(new EdgeRecord { EdgeType = edgeType, From = fromId, To = ResolveSymbolId(toSymbol) });
@@ -379,24 +602,45 @@ public sealed class SymbolGraphBuilder(string repoRoot, NdjsonWriter writer, Ext
         type.Name.EndsWith("Controller", StringComparison.Ordinal) ||
         type.GetAttributes().Any(a => a.AttributeClass?.Name is "ApiControllerAttribute");
 
+    /// <summary>
+    /// A verb attribute and a route template are two separate pieces of information that real
+    /// ASP.NET Core code very commonly splits across two separate attributes on the same method —
+    /// `[HttpPost]` (no inline path) plus a sibling `[Route("AddSubtask")]` is at least as common
+    /// as a single `[HttpGet("id")]` with an inline template. The previous version of this method
+    /// returned as soon as it found *either* one, so whichever attribute Roslyn happened to
+    /// enumerate first "won" and the other was silently ignored — a bare `[HttpPost]` encountered
+    /// before its sibling `[Route(...)]` produced an empty template, and since a Route's Symbol id
+    /// is built from (verb, template), every action reduced this way to the same (POST, "")
+    /// pair collided on the same id and only the first one survived TryClaim's dedup. This is what
+    /// made a real repo's route count look like 5 across 5,810 files instead of its real total.
+    /// </summary>
     private static (string verb, string template)? GetHttpVerbAndRoute(IMethodSymbol method)
     {
+        string? verb = null;
+        string? verbTemplate = null;
+        string? routeTemplate = null;
+
         foreach (var attr in method.GetAttributes())
         {
             var attrName = attr.AttributeClass?.Name;
-            var verb = HttpVerbAttributes.FirstOrDefault(v => attrName == v + "Attribute");
-            if (verb is not null)
+            var matchedVerb = HttpVerbAttributes.FirstOrDefault(v => attrName == v + "Attribute");
+            if (matchedVerb is not null)
             {
-                var template = attr.ConstructorArguments.FirstOrDefault().Value as string ?? "";
-                return (verb.Replace("Http", "").ToUpperInvariant(), template);
+                verb = matchedVerb.Replace("Http", "").ToUpperInvariant();
+                verbTemplate = attr.ConstructorArguments.FirstOrDefault().Value as string;
+                continue;
             }
             if (attrName == "RouteAttribute")
             {
-                var template = attr.ConstructorArguments.FirstOrDefault().Value as string ?? "";
-                return ("ROUTE", template);
+                routeTemplate = attr.ConstructorArguments.FirstOrDefault().Value as string;
             }
         }
-        return null;
+
+        if (verb is null && routeTemplate is null) return null;
+        // The verb attribute's own inline template wins when it has one (e.g. [HttpGet("id")]);
+        // otherwise fall back to a sibling [Route("...")] attribute's template.
+        var template = !string.IsNullOrEmpty(verbTemplate) ? verbTemplate! : routeTemplate ?? "";
+        return (verb ?? "ROUTE", template);
     }
 
     private static string? GetRouteTemplate(INamedTypeSymbol type, string typeName)

@@ -6,7 +6,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "rs-graph-mcp-server": "./dist/main.js"
+    "rs-graph-mcp-server": "./dist/main.js",
+    "rs-graph-mcp-workspace": "./dist/workspaceMain.js"
   },
   "exports": {
     ".": "./dist/index.js"
@@ -20,6 +21,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@rs-graph/core-schema": "0.1.0",
     "@rs-graph/graph-store": "0.1.0",
+    "@rs-graph/workspace-store": "0.1.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {

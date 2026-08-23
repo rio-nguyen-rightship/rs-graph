@@ -19,8 +19,9 @@ export interface SymbolWithDepth extends SymbolSummary {
 
 export interface ReferenceHit {
   symbol: SymbolSummary;
-  line: number | null;
-  col: number | null;
+  /** One entry per call/reference site — a symbol calling the target from N places gets one
+   * ReferenceHit with N occurrences, not N duplicate hits each repeating the full symbol. */
+  occurrences: Array<{ line: number | null; col: number | null }>;
 }
 
 export interface GraphStats {
@@ -59,6 +60,10 @@ export interface ComponentBinding {
     templatePath: string | null;
   };
   boundSymbols: SymbolSummary[];
+  /** True when this component binds to more symbols than maxBoundSymbols — a template-heavy
+   * component (a big form, in practice) can bind to far more members than a typical one, so
+   * capping only the outer component list doesn't bound a single row's own size. */
+  boundSymbolsTruncated: boolean;
 }
 
 export interface ContextPack {

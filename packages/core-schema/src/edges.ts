@@ -14,7 +14,10 @@ export type EdgeType =
   | "INJECTS"
   | "ROUTES_TO"
   | "REGISTERS"
-  | "BINDS_TEMPLATE";
+  | "BINDS_TEMPLATE"
+  | "INVOKES_ROUTE"
+  | "PUBLISHES"
+  | "CONSUMES";
 
 interface EdgeBase<T extends EdgeType> {
   record: "edge";
@@ -59,6 +62,36 @@ export type RegistersEdge = EdgeBase<"REGISTERS">;
 /** Component -> Symbol (class member) referenced from a template expression. */
 export type BindsTemplateEdge = EdgeBase<"BINDS_TEMPLATE">;
 
+/**
+ * Symbol -> cross-repo join key: a call through a generated SDK client method (e.g. an NSwag
+ * client decorated with RightShip.ApiClient's [RouteUrl("...")]) to the route it proxies. `to`
+ * is not a real Symbol id — no indexer run sees the producing repo — it's a normalized,
+ * verb-less `xrepo:route:{template}` key (see indexer-dotnet's RouteUtils.BuildCrossRepoRouteKey)
+ * that a cross-repo resolver matches against producing repos' verb-qualified Route symbol ids.
+ */
+export interface InvokesRouteEdge extends EdgeBase<"INVOKES_ROUTE"> {
+  line: number;
+  col?: number;
+}
+
+/**
+ * Symbol -> MessageContract: a method/function publishes (PUBLISHES) or handles (CONSUMES) a
+ * Service Bus message type. `to` is always the normalized `xrepo:message:{TypeName}` join key
+ * (see indexer-dotnet's MessageUtils / indexer-python's message_utils) even when the message
+ * contract class is locally declared and resolvable — producer and consumer(s) are often in
+ * different repos/languages with no shared compile-time reference, only the type name in
+ * common, so both edge kinds target the same name-based key uniformly rather than sometimes a
+ * real Symbol id and sometimes not.
+ */
+export interface PublishesEdge extends EdgeBase<"PUBLISHES"> {
+  line: number;
+  col?: number;
+}
+export interface ConsumesEdge extends EdgeBase<"CONSUMES"> {
+  line: number;
+  col?: number;
+}
+
 export type GraphEdgeRecord =
   | DefinesEdge
   | ExtendsEdge
@@ -70,4 +103,7 @@ export type GraphEdgeRecord =
   | InjectsEdge
   | RoutesToEdge
   | RegistersEdge
-  | BindsTemplateEdge;
+  | BindsTemplateEdge
+  | InvokesRouteEdge
+  | PublishesEdge
+  | ConsumesEdge;

@@ -15,9 +15,14 @@ export type Framework =
   | "django"
   | "unknown";
 
-/** Declared or synthesized symbol kinds. Route/DIRegistration are synthesized at a call-site
- * or attribute location rather than a normal declaration, but still get a Symbol row so every
- * addressable thing in the graph is reachable through one table. */
+/** Declared or synthesized symbol kinds. Route/DIRegistration/MessageContract are synthesized
+ * at a call-site or attribute location rather than a normal declaration, but still get a Symbol
+ * row so every addressable thing in the graph is reachable through one table. MessageContract is
+ * additionally cross-repo/cross-language stable by design: its id is a normalized
+ * `xrepo:message:{TypeName}` key (see indexer-dotnet's MessageUtils / indexer-python's
+ * message_utils), not a language-specific symbol id, since a Service Bus message's producer and
+ * consumer(s) often live in different repos and sometimes different languages with no shared
+ * compile-time reference — only the message type name in common. */
 export type SymbolKind =
   | "Class"
   | "Interface"
@@ -30,7 +35,9 @@ export type SymbolKind =
   | "Variable"
   | "Component"
   | "Route"
-  | "DIRegistration";
+  | "DIRegistration"
+  | "MessageContract"
+  | "HubEvent";
 
 export interface FileNode {
   record: "file";

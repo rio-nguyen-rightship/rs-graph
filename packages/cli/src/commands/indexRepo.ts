@@ -15,7 +15,8 @@ import {
   findTsConfig,
   loadProgram,
 } from "@rs-graph/indexer-typescript";
-import { detectProjects } from "../detect.js";
+import { detectProjects, type ProjectDetection } from "../detect.js";
+import { ensureMcpServerEntry } from "../mcpConfig.js";
 
 /**
  * Locates indexer-dotnet's build output relative to this package's own install location.
@@ -138,113 +139,182 @@ function isUniqueConstraintError(err: unknown): boolean {
   return err instanceof Error && "code" in err && err.code === "SQLITE_CONSTRAINT_PRIMARYKEY";
 }
 
+/** Thrown by ingestOrThrow for the specific "stale .rs-graph/graph.db" case, so callers can
+ * distinguish it from a generic indexing failure and react differently (the single-repo `index`
+ * command prints a fix-it message and exits; `index-workspace` records it as one repo's failure
+ * without aborting the batch — see indexWorkspace.ts). */
+export class DuplicateSymbolIdError extends Error {}
+
 /**
  * Wraps ingestGraphRecords so a duplicate-symbol-id constraint failure (most commonly: stale
  * data left in .rs-graph/graph.db by an older, buggier indexer version, or by an interrupted
- * prior run) surfaces as an actionable message instead of a raw SqliteError stack trace.
- * ingestGraphRecords runs inside a single db.transaction, so a thrown error has already been
- * rolled back — the database is left exactly as it was before this call.
+ * prior run) throws an actionable message instead of a raw SqliteError. ingestGraphRecords runs
+ * inside a single db.transaction, so a thrown error has already been rolled back — the database
+ * is left exactly as it was before this call.
  */
-function ingestOrExit(db: GraphDb, records: GraphRecord[], language: string): ReturnType<typeof ingestGraphRecords> {
+function ingestOrThrow(db: GraphDb, records: GraphRecord[]): ReturnType<typeof ingestGraphRecords> {
   try {
     return ingestGraphRecords(db, records);
   } catch (err) {
     if (!isUniqueConstraintError(err)) throw err;
-    console.error(
-      `\n  - ${language}: ingest failed — .rs-graph/graph.db has a duplicate symbol id. This usually means ` +
-        "it holds stale data from an older rs-graph version or an interrupted prior run.\n" +
-        "    Fix: re-run with --fresh to delete .rs-graph/ and rebuild the database from scratch.\n",
+    throw new DuplicateSymbolIdError(
+      ".rs-graph/graph.db has a duplicate symbol id. This usually means it holds stale data from " +
+        "an older rs-graph version or an interrupted prior run. Fix: re-run with --fresh to delete " +
+        ".rs-graph/ and rebuild the database from scratch.",
     );
-    closeGraphDb(db);
-    process.exit(1);
   }
 }
 
-export async function runIndex(targetPath: string, options: RunIndexOptions = {}): Promise<void> {
-  const detection = detectProjects(targetPath);
-
-  if (detection.languages.size === 0) {
-    console.log(
-      "No recognized project type found under this path (looked for .sln/.csproj, package.json with @angular/core or aurelia, requirements.txt/pyproject.toml/setup.py).",
-    );
-    return;
+/** Runs every detected language's indexer against an already-open db, ingesting each one's
+ * records. Shared by runIndex (single-repo CLI, exits the process on failure) and
+ * runIndexForWorkspace (batch mode, returns a structured outcome instead) — see indexWorkspace.ts
+ * for why the batch path needs a non-exiting variant. Throws on any indexer/ingest failure. */
+async function indexLanguages(
+  db: GraphDb,
+  targetPath: string,
+  detection: ProjectDetection,
+  options: RunIndexOptions,
+): Promise<void> {
+  for (const language of detection.languages) {
+    if (language === "csharp") {
+      const dllPath = findDotnetIndexerDll();
+      if (!dllPath) {
+        console.log(
+          "  - csharp: indexer-dotnet isn't built yet — run `dotnet build` in packages/indexer-dotnet/src first.",
+        );
+        continue;
+      }
+      let target: string | undefined;
+      if (options.slnPath) {
+        target = resolveAgainst(targetPath, options.slnPath);
+        if (!fs.existsSync(target)) {
+          console.log(`  - csharp: --sln path not found: ${target}`);
+          continue;
+        }
+      } else {
+        target = detection.markers.slnFiles[0] ?? detection.markers.csprojFiles[0];
+        if (detection.markers.slnFiles.length > 1) {
+          console.log(
+            `  - csharp: found ${detection.markers.slnFiles.length} .sln/.slnx files, using ` +
+              `${target ? path.basename(target) : "(none)"} — pass --sln <path> to pick a different one.`,
+          );
+        }
+      }
+      if (!target) continue;
+      console.log(`  - csharp: indexing ${path.basename(target)}...`);
+      const records = await runDotnetIndexer(dllPath, target, targetPath);
+      console.log(`    ${JSON.stringify(ingestOrThrow(db, records))}`);
+    } else if (language === "typescript") {
+      let tsconfigPath: string;
+      if (options.tsconfigPath) {
+        tsconfigPath = resolveAgainst(targetPath, options.tsconfigPath);
+        if (!fs.existsSync(tsconfigPath)) {
+          console.log(`  - typescript: --tsconfig path not found: ${tsconfigPath}`);
+          continue;
+        }
+      } else {
+        try {
+          tsconfigPath = findTsConfig(targetPath);
+        } catch {
+          console.log("  - typescript: no tsconfig.json found — skipping.");
+          continue;
+        }
+      }
+      console.log(`  - typescript: indexing via ${path.basename(tsconfigPath)}...`);
+      const records = runTypeScriptIndexer(tsconfigPath, targetPath);
+      console.log(`    ${JSON.stringify(ingestOrThrow(db, records))}`);
+    } else if (language === "python") {
+      const scriptPath = findPythonIndexerScript();
+      if (!scriptPath) {
+        console.log("  - python: indexer-python script not found.");
+        continue;
+      }
+      console.log("  - python: indexing...");
+      const records = await runPythonIndexer(scriptPath, targetPath, targetPath);
+      console.log(`    ${JSON.stringify(ingestOrThrow(db, records))}`);
+    } else {
+      console.log(`  - ${language}: no indexer available yet — coming in a later phase.`);
+    }
   }
+}
+
+/** Detects project type, prints a summary, and removes a stale .rs-graph/ if --fresh was passed.
+ * Shared setup between runIndex and runIndexForWorkspace. */
+function prepareIndexing(targetPath: string, options: RunIndexOptions): { detection: ProjectDetection } | { unsupported: true } {
+  const detection = detectProjects(targetPath);
+  if (detection.languages.size === 0) return { unsupported: true };
 
   const frameworkSuffix =
     detection.frameworks.size > 0 ? ` (frameworks: ${[...detection.frameworks].join(", ")})` : "";
   console.log(`Detected: ${[...detection.languages].join(", ")}${frameworkSuffix}`);
 
   const rsGraphDir = path.join(targetPath, ".rs-graph");
-  const dbPath = path.join(rsGraphDir, "graph.db");
   if (options.fresh && fs.existsSync(rsGraphDir)) {
     console.log("  --fresh: removing existing .rs-graph/ before indexing...");
     fs.rmSync(rsGraphDir, { recursive: true, force: true });
   }
-  const db = openGraphDb({ dbPath });
+  return { detection };
+}
 
+export async function runIndex(targetPath: string, options: RunIndexOptions = {}): Promise<void> {
+  const prepared = prepareIndexing(targetPath, options);
+  if ("unsupported" in prepared) {
+    console.log(
+      "No recognized project type found under this path (looked for .sln/.csproj, package.json with @angular/core or aurelia, requirements.txt/pyproject.toml/setup.py).",
+    );
+    return;
+  }
+
+  const dbPath = path.join(targetPath, ".rs-graph", "graph.db");
+  const db = openGraphDb({ dbPath });
   try {
-    for (const language of detection.languages) {
-      if (language === "csharp") {
-        const dllPath = findDotnetIndexerDll();
-        if (!dllPath) {
-          console.log(
-            "  - csharp: indexer-dotnet isn't built yet — run `dotnet build` in packages/indexer-dotnet/src first.",
-          );
-          continue;
-        }
-        let target: string | undefined;
-        if (options.slnPath) {
-          target = resolveAgainst(targetPath, options.slnPath);
-          if (!fs.existsSync(target)) {
-            console.log(`  - csharp: --sln path not found: ${target}`);
-            continue;
-          }
-        } else {
-          target = detection.markers.slnFiles[0] ?? detection.markers.csprojFiles[0];
-          if (detection.markers.slnFiles.length > 1) {
-            console.log(
-              `  - csharp: found ${detection.markers.slnFiles.length} .sln/.slnx files, using ` +
-                `${target ? path.basename(target) : "(none)"} — pass --sln <path> to pick a different one.`,
-            );
-          }
-        }
-        if (!target) continue;
-        console.log(`  - csharp: indexing ${path.basename(target)}...`);
-        const records = await runDotnetIndexer(dllPath, target, targetPath);
-        console.log(`    ${JSON.stringify(ingestOrExit(db, records, "csharp"))}`);
-      } else if (language === "typescript") {
-        let tsconfigPath: string;
-        if (options.tsconfigPath) {
-          tsconfigPath = resolveAgainst(targetPath, options.tsconfigPath);
-          if (!fs.existsSync(tsconfigPath)) {
-            console.log(`  - typescript: --tsconfig path not found: ${tsconfigPath}`);
-            continue;
-          }
-        } else {
-          try {
-            tsconfigPath = findTsConfig(targetPath);
-          } catch {
-            console.log("  - typescript: no tsconfig.json found — skipping.");
-            continue;
-          }
-        }
-        console.log(`  - typescript: indexing via ${path.basename(tsconfigPath)}...`);
-        const records = runTypeScriptIndexer(tsconfigPath, targetPath);
-        console.log(`    ${JSON.stringify(ingestOrExit(db, records, "typescript"))}`);
-      } else if (language === "python") {
-        const scriptPath = findPythonIndexerScript();
-        if (!scriptPath) {
-          console.log("  - python: indexer-python script not found.");
-          continue;
-        }
-        console.log("  - python: indexing...");
-        const records = await runPythonIndexer(scriptPath, targetPath, targetPath);
-        console.log(`    ${JSON.stringify(ingestOrExit(db, records, "python"))}`);
-      } else {
-        console.log(`  - ${language}: no indexer available yet — coming in a later phase.`);
-      }
+    await indexLanguages(db, targetPath, prepared.detection, options);
+  } catch (err) {
+    if (err instanceof DuplicateSymbolIdError) {
+      console.error(`\n  - ingest failed: ${err.message}\n`);
+      process.exitCode = 1;
+      return;
     }
+    throw err;
   } finally {
     closeGraphDb(db);
+  }
+
+  const mcpResult = ensureMcpServerEntry(targetPath, "rs-graph", { command: "rs-graph", args: ["serve", "."] });
+  if (mcpResult === "added") {
+    console.log('  .mcp.json: added "rs-graph" server entry.');
+  }
+}
+
+/** Outcome of indexing one repo as part of a workspace batch (see indexWorkspace.ts) — never
+ * throws or exits the process, so one repo's failure doesn't abort the rest of the batch. */
+export interface WorkspaceIndexOutcome {
+  status: "ok" | "unsupported" | "failed";
+  languages?: string[];
+  error?: string;
+}
+
+export async function runIndexForWorkspace(
+  targetPath: string,
+  options: RunIndexOptions = {},
+): Promise<WorkspaceIndexOutcome> {
+  let prepared: ReturnType<typeof prepareIndexing>;
+  try {
+    prepared = prepareIndexing(targetPath, options);
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+  if ("unsupported" in prepared) return { status: "unsupported" };
+
+  const dbPath = path.join(targetPath, ".rs-graph", "graph.db");
+  let db: GraphDb | undefined;
+  try {
+    db = openGraphDb({ dbPath });
+    await indexLanguages(db, targetPath, prepared.detection, options);
+    return { status: "ok", languages: [...prepared.detection.languages] };
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    if (db) closeGraphDb(db);
   }
 }

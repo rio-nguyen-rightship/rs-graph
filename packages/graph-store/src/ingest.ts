@@ -103,6 +103,22 @@ export function ingestGraphRecords(db: GraphDb, records: Iterable<GraphRecord>):
     `INSERT INTO Symbol (id, name, kind, signature, docSummary, filePath, startLine, endLine, startCol, endCol, modifiers, external)
      VALUES (@id, @name, @kind, @signature, @docSummary, @filePath, @startLine, @endLine, @startCol, @endCol, @modifiers, @external)`,
   );
+  // MessageContract/HubEvent ids are deliberately language-agnostic (xrepo:message:.../
+  // xrepo:signal:..., no language prefix — see indexer-dotnet's MessageUtils/SignalUtils) so a
+  // cross-repo join can match them verbatim regardless of which language's indexer produced
+  // them. That same property means two different languages in the *same* repo (e.g. a C#
+  // backend publishing a message and a TypeScript frontend consuming it) each independently
+  // decide "I haven't seen this key yet" and both try to insert it — each indexer's own
+  // dedup/TryClaim guard only covers its own run, not what a different language's *separate*
+  // ingestGraphRecords call already wrote. INSERT OR IGNORE here means the second insert is a
+  // harmless no-op instead of a Symbol.id PRIMARY KEY crash; every kind is still a plain INSERT,
+  // so a genuine id collision between two real declarations (a real bug, as opposed to two
+  // languages correctly agreeing on a shared cross-repo key) still surfaces loudly.
+  const CROSS_LANGUAGE_SYNTHESIZED_KINDS = new Set(["MessageContract", "HubEvent"]);
+  const insertOrIgnoreSymbolStmt = db.prepare(
+    `INSERT OR IGNORE INTO Symbol (id, name, kind, signature, docSummary, filePath, startLine, endLine, startCol, endCol, modifiers, external)
+     VALUES (@id, @name, @kind, @signature, @docSummary, @filePath, @startLine, @endLine, @startCol, @endCol, @modifiers, @external)`,
+  );
   const insertFtsStmt = db.prepare(
     `INSERT INTO SymbolFts (id, name, signature, docSummary) VALUES (@id, @name, @signature, @docSummary)`,
   );
@@ -141,7 +157,7 @@ export function ingestGraphRecords(db: GraphDb, records: Iterable<GraphRecord>):
       if (!changedFiles.has(symbol.filePath)) continue;
       const signature = redactSecrets(symbol.signature);
       const docSummary = redactSecretsIfPresent(symbol.docSummary) ?? null;
-      insertSymbolStmt.run({
+      const params = {
         ...symbol,
         signature,
         docSummary,
@@ -149,7 +165,15 @@ export function ingestGraphRecords(db: GraphDb, records: Iterable<GraphRecord>):
         endCol: symbol.endCol ?? null,
         modifiers: JSON.stringify(symbol.modifiers),
         external: symbol.external ? 1 : 0,
-      });
+      };
+
+      if (CROSS_LANGUAGE_SYNTHESIZED_KINDS.has(symbol.kind)) {
+        const result = insertOrIgnoreSymbolStmt.run(params);
+        if (result.changes === 0) continue; // already inserted by a different language's batch
+      } else {
+        insertSymbolStmt.run(params);
+      }
+
       insertFtsStmt.run({
         id: symbol.id,
         name: symbol.name,

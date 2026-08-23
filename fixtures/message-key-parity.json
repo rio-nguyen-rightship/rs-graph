@@ -1,0 +1,6 @@
+[
+  { "input": "ChecklistTasksCompletedMessage", "expectedKey": "xrepo:message:ChecklistTasksCompletedMessage" },
+  { "input": "VoyageChecklistsGeneratedMessage", "expectedKey": "xrepo:message:VoyageChecklistsGeneratedMessage" },
+  { "input": "RightshipRFIReminderMessage", "expectedKey": "xrepo:message:RightshipRFIReminderMessage" },
+  { "input": "SFLinkSyncInspectionOrderToSFCommand", "expectedKey": "xrepo:message:SFLinkSyncInspectionOrderToSFCommand" }
+]

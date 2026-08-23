@@ -66,18 +66,26 @@ failed: Symbol.id` error — pass `--fresh` to delete it and rebuild from scratc
 node <path-to-rs-graph>/packages/cli/dist/main.js index . --fresh
 ```
 
-Register it with Claude Code by adding to the target repo's `.mcp.json`:
+`index` registers the repo with Claude Code automatically — it adds an `"rs-graph"` entry to the
+target repo's `.mcp.json` (creating the file if needed, merging into it without touching other
+entries if not), assuming `rs-graph` resolves on `PATH`:
 
 ```json
 {
   "mcpServers": {
     "rs-graph": {
-      "command": "node",
-      "args": ["<path-to-rs-graph>/packages/cli/dist/main.js", "serve", "."]
+      "command": "rs-graph",
+      "args": ["serve", "."]
     }
   }
 }
 ```
+
+If you're running from this monorepo without a global/linked install, `rs-graph` won't be on
+`PATH` yet — edit the generated entry's `command`/`args` to the `node <path-to-rs-graph>/packages/
+cli/dist/main.js` form instead (same as the `index` invocation above, with `serve` in place of
+`index`). Re-running `index` never overwrites an existing entry under the same name, so this edit
+sticks across re-indexing.
 
 See [docs/mcp-tools.md](docs/mcp-tools.md) for the full tool reference, and
 [docs/architecture.md](docs/architecture.md) for how the pipeline is put together.
@@ -111,9 +119,14 @@ packages/
   indexer-typescript/      TS-Compiler-API-based indexer + Angular/Aurelia enrichment
   indexer-python/          ast-based Python indexer + Flask/FastAPI/Django route enrichment
   mcp-server/               MCP tools, thin wrappers over graph-store's queries
-  cli/                       `rs-graph init|index|watch|serve`
+  workspace-store/          cross-repo join index (routes/messages/SignalR events) for the workspace tools
+  cli/                       rs-graph init|index|watch|serve|index-workspace|serve-workspace|
+                             install-hook|install-hook-workspace
   eval/                       benchmark harness comparing rs-graph vs. grep/read (see packages/eval/README.md)
-fixtures/                 one small sample project per language, used as integration-test targets
+fixtures/                 one small sample project per language, plus sample-workspace (two tiny
+                          repos wired together, used as the cross-repo integration-test target)
+templates/
+  post-merge.sample         git post-merge hook, installed by `rs-graph install-hook`
 docs/
   architecture.md
   mcp-tools.md
@@ -129,9 +142,30 @@ cd packages/indexer-dotnet/tests && dotnet test     # .NET indexer tests (xUnit)
 cd packages/indexer-python && python -m pytest tests # Python indexer tests (pytest)
 ```
 
+### After changing rs-graph's own code
+
+`rs-graph` runs compiled JavaScript from each package's `dist/` folder, not the TypeScript source
+directly — a source change does nothing until rebuilt. Whether you also need to re-index or
+restart anything depends on what changed:
+
+- **Rebuild** (`npm run build --workspaces --if-present`): always required after any source change.
+- **Re-index** (`rs-graph index`/`index-workspace`): only needed if the change affects what gets
+  *written* to `.rs-graph/graph.db` — an indexer (`indexer-dotnet`/`-typescript`/`-python`) or
+  `graph-store/src/ingest.ts`. A change to query/tool logic (`graph-store/src/queries.ts`,
+  `mcp-server/src/tools.ts`) reads the existing database unchanged, so the same
+  already-indexed data just gets served differently — no re-index needed.
+- **Restart the MCP server** (reopen the Claude Code session, or otherwise restart the `rs-graph
+  serve`/`serve-workspace` process): always required after a rebuild — it's a long-running process
+  that already loaded the old code into memory, so rebuilding alone doesn't hot-reload it.
+
 ## Status & limitations
 
-Done: .NET, Angular, Aurelia, and Python indexers; incremental `watch`; all 14 MCP tools;
+Done: .NET, Angular, Aurelia, and Python indexers; incremental `watch`; 14 single-repo MCP tools
+plus 4 cross-repo workspace tools (sync API calls via NSwag `[RouteUrl]`, Azure Service Bus
+messaging, SignalR — see [docs/mcp-tools.md](docs/mcp-tools.md#cross-repo-workspace-tools));
+automatic `.mcp.json` registration on `index`/`index-workspace` (no manual server setup step); a
+`post-merge` git hook (`install-hook`/`install-hook-workspace`) that re-indexes in the background
+after `git pull` (see [docs/mcp-tools.md](docs/mcp-tools.md#keeping-the-graph-fresh-on-git-pull));
 secret redaction; a "never shells out to a build/package-manager command" regression test.
 
 Not done yet:
@@ -144,3 +178,12 @@ Not done yet:
   resolution (Python's `ast` module is syntax-only) — see `packages/indexer-python/src/graph_builder.py`.
 - Aurelia template-binding extraction is a regex heuristic, not a real template parse (same
   trade-off Angular's enrichment makes, documented in `angularEnrichment.ts`).
+- A generated SDK client method decorated with `[RouteUrl]` carries only the route path, never
+  the verb — `graph_workspace_route_consumers` matches on template alone, so a producer that
+  registers the same template under more than one verb returns every candidate rather than
+  disambiguating (see `SymbolGraphBuilder.EmitSignalREdges`'s sibling, the sync-API pass, in
+  `packages/indexer-dotnet/src/SymbolGraphBuilder.cs`).
+- None of the three indexers are incremental at the parse/compile level — `rs-graph index`
+  always fully re-scans/re-compiles the whole repo; only the database write skips unchanged files
+  (see `ingest.ts`'s content-hash check). This is why the post-merge hook above runs detached
+  rather than blocking the pull — see its docs section for the full rationale.

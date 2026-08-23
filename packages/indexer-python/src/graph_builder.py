@@ -17,6 +17,7 @@ import ast
 import hashlib
 
 from import_resolver import collect_import_bindings
+from message_utils import build_message_key
 from models import edge_record, file_record, symbol_record
 from symbol_utils import (
     build_owned_id,
@@ -171,12 +172,41 @@ def _resolve_call(call, rel_path, current_class_id, imports, registry):
     return None
 
 
+def _match_send_message_call(call):
+    """Matches `<anything>.send_message(<args...>, "TypeName")` — this org's internal Python
+    Service Bus wrapper (see the real AzureServiceBusService.send_message) always passes the
+    message-type name as its last positional argument, a bare string literal."""
+    if not (isinstance(call.func, ast.Attribute) and call.func.attr == "send_message"):
+        return None
+    if not call.args:
+        return None
+    last_arg = call.args[-1]
+    if isinstance(last_arg, ast.Constant) and isinstance(last_arg.value, str):
+        return last_arg.value
+    return None
+
+
+def _match_enclosed_message_type_compare(compare):
+    """Matches `<expr> == "TypeName"` — the shape of this org's EnclosedMessageType-keyed
+    dispatch branch (e.g. `if message_type == 'ChecklistSourceStatusChangeMessage':`). Loose by
+    design: any single string-literal equality comparison inside a function counts as that
+    function handling the named message type, since the real dispatch code compares a locally
+    read property value we have no way to trace back more precisely without a type checker."""
+    if len(compare.ops) != 1 or not isinstance(compare.ops[0], ast.Eq):
+        return None
+    for side in (compare.left, compare.comparators[0]):
+        if isinstance(side, ast.Constant) and isinstance(side.value, str):
+            return side.value
+    return None
+
+
 class PythonGraphBuilder:
     def __init__(self, repo_root, writer, external_symbols, registry):
         self.repo_root = repo_root
         self.writer = writer
         self.external_symbols = external_symbols
         self.registry = registry
+        self._emitted_message_keys = set()
 
     def process(self, ctx):
         self._emit_file_record(ctx)
@@ -268,6 +298,44 @@ class PythonGraphBuilder:
             target_id = _resolve_call(call, ctx.rel_path, class_id, ctx.imports, self.registry)
             if target_id:
                 self.writer(edge_record("CALLS", fn_id, target_id, line=call.lineno, col=call.col_offset + 1))
+
+            message_type = _match_send_message_call(call)
+            if message_type:
+                self._emit_publishes(fn_id, message_type, call, ctx)
+
+        for compare in ast.walk(node):
+            if not isinstance(compare, ast.Compare):
+                continue
+            message_type = _match_enclosed_message_type_compare(compare)
+            if message_type:
+                self._emit_consumes(fn_id, message_type, compare, ctx)
+
+    def _emit_message_contract_symbol(self, message_key, type_name, ctx, node):
+        if message_key in self._emitted_message_keys:
+            return  # already emitted from an earlier publisher/consumer of the same type
+        self._emitted_message_keys.add(message_key)
+        self.writer(
+            symbol_record(
+                message_key,
+                type_name,
+                "MessageContract",
+                type_name,
+                ctx.rel_path,
+                node.lineno,
+                node.lineno,
+            )
+        )
+        self.writer(edge_record("DEFINES", ctx.rel_path, message_key))
+
+    def _emit_publishes(self, fn_id, type_name, node, ctx):
+        message_key = build_message_key(type_name)
+        self._emit_message_contract_symbol(message_key, type_name, ctx, node)
+        self.writer(edge_record("PUBLISHES", fn_id, message_key, line=node.lineno, col=node.col_offset + 1))
+
+    def _emit_consumes(self, fn_id, type_name, node, ctx):
+        message_key = build_message_key(type_name)
+        self._emit_message_contract_symbol(message_key, type_name, ctx, node)
+        self.writer(edge_record("CONSUMES", fn_id, message_key, line=node.lineno, col=node.col_offset + 1))
 
     def _class_name_of(self, class_id, ctx):
         for name, cid in self.registry.classes_by_file.get(ctx.rel_path, {}).items():

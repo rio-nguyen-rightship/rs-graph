@@ -144,6 +144,54 @@ describe("TsGraphBuilder + AngularEnricher against fixtures/sample-angular-app",
     expect(edge && "to" in edge ? edge.to : undefined).toBe("typescript:src/about.component.ts#AboutComponent");
   });
 
+  it("extracts a CONSUMES edge from a .on(...) call site, resolving the event name through a referenced constant", () => {
+    // SignalClientService.subscribeToVoyageStatusChanged calls connection.on(SignalEvents.
+    // voyageStatusChanged, ...) — the event name is a property access, not a literal, matching
+    // real usage (qiportal's SignalFunctions, psc-riskiq-app's PscRiskIqSignalREvents both name
+    // events this way). The edge target is the normalized xrepo:signal:{name} key, matching
+    // indexer-dotnet's SignalUtils exactly, not a TS-specific id.
+    expect(
+      edgesByType("CONSUMES").some(
+        (e) =>
+          e.record === "edge" &&
+          e.from === "typescript:src/signal.service.ts#SignalClientService.subscribeToVoyageStatusChanged" &&
+          e.to === "xrepo:signal:voyageStatusChanged",
+      ),
+    ).toBe(true);
+  });
+
+  it("extracts a CONSUMES edge from a .subscribe(...) call site (the wrapper alias)", () => {
+    expect(
+      edgesByType("CONSUMES").some(
+        (e) =>
+          e.record === "edge" &&
+          e.from === "typescript:src/signal.service.ts#SignalClientService.subscribeToChecklistGenerationCompleted" &&
+          e.to === "xrepo:signal:checklistGenerationCompleted",
+      ),
+    ).toBe(true);
+  });
+
+  it("extracts one PUBLISHES edge per resolvable argument to .invoke(...)", () => {
+    // invokeOnboardingHub calls connection.invoke('InvokeServerFunction', 'OnboardingHub', data) —
+    // this org's Genesis.SignalR convention puts the real dispatch name in arg 1, not arg 0 (the
+    // standard SignalR convention), so both literals get an edge rather than hard-coding either
+    // position.
+    const publishes = edgesByType("PUBLISHES").filter(
+      (e) =>
+        e.record === "edge" &&
+        e.from === "typescript:src/signal.service.ts#SignalClientService.invokeOnboardingHub",
+    );
+    const targets = publishes.map((e) => (e.record === "edge" ? e.to : undefined));
+    expect(targets.sort()).toEqual(["xrepo:signal:InvokeServerFunction", "xrepo:signal:OnboardingHub"].sort());
+  });
+
+  it("emits a HubEvent symbol for each distinct SignalR event/dispatch name", () => {
+    const hubEvents = symbolsByKind("HubEvent").map((s) => (s.record === "symbol" ? s.name : undefined));
+    expect(hubEvents.sort()).toEqual(
+      ["voyageStatusChanged", "checklistGenerationCompleted", "InvokeServerFunction", "OnboardingHub"].sort(),
+    );
+  });
+
   it("is idempotent at the id level: re-running produces the same ids", () => {
     const { program, checker, ownedFiles, compilerOptions } = loadProgram(TSCONFIG);
     const sink2 = new ArraySink();

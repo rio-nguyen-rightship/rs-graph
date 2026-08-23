@@ -4,6 +4,6 @@
     "outDir": "dist",
     "rootDir": "src"
   },
-  "references": [{ "path": "../core-schema" }, { "path": "../graph-store" }],
+  "references": [{ "path": "../core-schema" }, { "path": "../graph-store" }, { "path": "../workspace-store" }],
   "include": ["src"]
 }

@@ -54,6 +54,7 @@ export class TsGraphBuilder {
 
     this.emitImportEdges(sourceFile, relPath);
     this.emitCallEdges(sourceFile);
+    this.emitSignalrEdges(sourceFile, relPath);
   }
 
   private emitFileRecord(sourceFile: ts.SourceFile, relPath: string): void {
@@ -289,6 +290,101 @@ export class TsGraphBuilder {
         return buildOwnedId(this.repoRoot, current.parent);
       }
       current = current.parent;
+    }
+    return undefined;
+  }
+
+  /**
+   * Extracts cross-repo/cross-language SignalR edges: `.on(...)`/`.subscribe(...)` calls (a
+   * client listening for a server broadcast — matched purely by member name, since a
+   * HubConnection or a thin wrapper around one has no distinguishing TS type to check
+   * semantically) and `.invoke(...)` calls (a client requesting a server-side handler). Both
+   * target the normalized `xrepo:signal:{name}` key regardless of local resolvability — see
+   * indexer-dotnet's SignalUtils and SymbolGraphBuilder.EmitSignalREdges for the matching C#
+   * side (Genesis.SignalR's ISignalService.Send / ISignalHubInterceptor.InterceptorName).
+   *
+   * `.invoke(...)` emits one edge per resolvable argument, not just the first: standard SignalR
+   * usage passes the method name as arg 0, but this org's own Genesis.SignalR client wrapper
+   * calls `invoke('InvokeServerFunction', interceptorName, functionName, data)` — the real
+   * dispatch name is arg 1, not arg 0. Emitting for every resolvable argument covers both
+   * conventions without hard-coding either one; an edge with no matching consumer elsewhere is
+   * just unresolved, not wrong.
+   *
+   * Event-name arguments are resolved one hop through a referenced constant, not just direct
+   * string literals: real usage in both qiportal (`SignalFunctions.entitiesMetadataChanged`) and
+   * psc-riskiq-app (`PscRiskIqSignalREvents.checklistGenerationCompleted`) always names the event
+   * through an exported `{ key: "value" }` constants object, never a literal at the call site
+   * itself — matching only direct literals (as indexer-python/indexer-dotnet's messaging
+   * extraction do) would silently miss every real call site.
+   */
+  private emitSignalrEdges(sourceFile: ts.SourceFile, relPath: string): void {
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+        const memberName = node.expression.name.text;
+        const containerId = this.findEnclosingCallableId(node);
+        if (containerId) {
+          if (memberName === "on" || memberName === "subscribe") {
+            const eventName = this.resolveStringValue(node.arguments[0]);
+            if (eventName) this.emitSignalEdge("CONSUMES", containerId, eventName, sourceFile, relPath, node);
+          } else if (memberName === "invoke") {
+            for (const arg of node.arguments) {
+              const eventName = this.resolveStringValue(arg);
+              if (eventName) this.emitSignalEdge("PUBLISHES", containerId, eventName, sourceFile, relPath, node);
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+
+  private emitSignalEdge(
+    edgeType: "PUBLISHES" | "CONSUMES",
+    containerId: string,
+    eventName: string,
+    sourceFile: ts.SourceFile,
+    relPath: string,
+    node: ts.CallExpression,
+  ): void {
+    const key = `xrepo:signal:${eventName}`;
+    if (!this.emittedIds.has(key)) {
+      this.emittedIds.add(key);
+      this.sink.write({
+        record: "symbol",
+        id: key,
+        name: eventName,
+        kind: "HubEvent",
+        signature: eventName,
+        filePath: relPath,
+        ...this.getSpan(node, sourceFile),
+        modifiers: [],
+        external: false,
+      });
+      this.sink.write({ record: "edge", edgeType: "DEFINES", from: relPath, to: key });
+    }
+    const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+    this.sink.write({ record: "edge", edgeType, from: containerId, to: key, line: line + 1, col: character + 1 });
+  }
+
+  /** Resolves an expression to a string constant: a direct literal, or one hop through a
+   * referenced object-literal property (`Constants.name`), enum member, or `const` variable
+   * whose initializer is itself a string literal — see emitSignalrEdges for why the one-hop case
+   * is the common one in practice, not the literal case. */
+  private resolveStringValue(expr: ts.Expression | undefined): string | undefined {
+    if (!expr) return undefined;
+    if (ts.isStringLiteral(expr)) return expr.text;
+    if (!ts.isPropertyAccessExpression(expr) && !ts.isIdentifier(expr)) return undefined;
+
+    const nameNode = ts.isPropertyAccessExpression(expr) ? expr.name : expr;
+    const symbol = this.resolveAliasedSymbol(this.checker.getSymbolAtLocation(nameNode));
+    const decl = symbol?.valueDeclaration;
+    if (!decl) return undefined;
+
+    if (ts.isPropertyAssignment(decl) && ts.isStringLiteral(decl.initializer)) return decl.initializer.text;
+    if (ts.isEnumMember(decl) && decl.initializer && ts.isStringLiteral(decl.initializer)) return decl.initializer.text;
+    if (ts.isVariableDeclaration(decl) && decl.initializer && ts.isStringLiteral(decl.initializer)) {
+      return decl.initializer.text;
     }
     return undefined;
   }

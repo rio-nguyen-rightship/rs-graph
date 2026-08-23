@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { openGraphDb, type GraphDb } from "@rs-graph/graph-store";
@@ -19,6 +19,7 @@ const AURELIA_FIXTURE = path.join(REPO_ROOT, "fixtures/sample-aurelia-app");
 
 function rmRsGraphDir(repoPath: string): void {
   fs.rmSync(path.join(repoPath, ".rs-graph"), { recursive: true, force: true });
+  fs.rmSync(path.join(repoPath, ".mcp.json"), { force: true });
 }
 
 async function callTool(dbPath: string, name: string, args: Record<string, unknown> = {}): Promise<unknown> {
@@ -58,6 +59,16 @@ describe("end-to-end: rs-graph index + serve across every language fixture", () 
     rmRsGraphDir(AURELIA_FIXTURE);
   });
 
+  // Backstop beyond afterEach: when this file runs alongside others in the same vitest
+  // invocation, the last afterEach can race worker teardown and leave the final test's
+  // artifacts behind — this guarantees a clean end state regardless.
+  afterAll(() => {
+    rmRsGraphDir(DOTNET_FIXTURE);
+    rmRsGraphDir(ANGULAR_FIXTURE);
+    rmRsGraphDir(PYTHON_FIXTURE);
+    rmRsGraphDir(AURELIA_FIXTURE);
+  });
+
   it(
     "indexes and serves the .NET fixture via a real MCP tool call",
     async () => {
@@ -68,15 +79,32 @@ describe("end-to-end: rs-graph index + serve across every language fixture", () 
       const dbPath = path.join(DOTNET_FIXTURE, ".rs-graph", "graph.db");
 
       const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
-      expect(stats.totalFiles).toBe(7); // includes Domain/Greeter.Diagnostics.cs (a second partial-class file) + 2 external pseudo-files
-      expect(stats.byLanguage.csharp).toBe(7);
+      // 13 real .cs files (Domain/{IGreeter,Greeter,Greeter.Diagnostics}.cs, Api/{GreetingController,
+      // Program,VesselLookupService,Clients/VesselApiClient,Messaging/{Messaging,VoyageChecklistPublisher,
+      // VoyageChecklistConsumer},Signaling/{Signaling,VoyageStatusPublisher,OnboardingHubInterceptor}}.cs)
+      // + 2 external pseudo-files.
+      expect(stats.totalFiles).toBe(15);
+      expect(stats.byLanguage.csharp).toBe(15);
 
-      const routes = (await callTool(dbPath, "graph_get_route_map")) as Array<{ route: { name: string } }>;
-      expect(routes).toHaveLength(1);
-      expect(routes[0]?.route.name).toBe("GET api/Greeting/{name}");
+      const routeMap = (await callTool(dbPath, "graph_get_route_map")) as {
+        routes: Array<{ route: { name: string } }>;
+      };
+      // GreetingController exposes GET/POST/DELETE under the same route template — GET and POST
+      // via a single attribute carrying both verb and inline path (see RouteUtils.BuildRouteId's
+      // regression fixture), DELETE via two separate attributes ([HttpDelete] + [Route(...)] —
+      // see GetHttpVerbAndRoute's regression fixture) — three distinct Route symbols.
+      expect(routeMap.routes.map((r) => r.route.name).sort()).toEqual(
+        ["GET api/Greeting/{name}", "POST api/Greeting/{name}", "DELETE api/Greeting/{name}"].sort(),
+      );
 
-      const diGraph = (await callTool(dbPath, "graph_get_di_graph")) as Array<{ target: { id: string } | null }>;
-      expect(diGraph.some((d) => d.target?.id === "csharp:global::SampleApi.Domain.Greeter")).toBe(true);
+      const diGraph = (await callTool(dbPath, "graph_get_di_graph")) as {
+        registrations: Array<{ target: { id: string } | null }>;
+      };
+      expect(diGraph.registrations.some((d) => d.target?.id === "csharp:global::SampleApi.Domain.Greeter")).toBe(true);
+
+      // Indexing should register this repo's MCP server automatically, no manual .mcp.json step.
+      const mcpConfig = JSON.parse(fs.readFileSync(path.join(DOTNET_FIXTURE, ".mcp.json"), "utf8"));
+      expect(mcpConfig.mcpServers["rs-graph"]).toEqual({ command: "rs-graph", args: ["serve", "."] });
     },
     30_000,
   );
@@ -93,8 +121,8 @@ describe("end-to-end: rs-graph index + serve across every language fixture", () 
       const stats = (await callTool(dbPath, "graph_stats")) as { byLanguage: Record<string, number> };
       expect(stats.byLanguage.csharp).toBeGreaterThan(0);
 
-      const routes = (await callTool(dbPath, "graph_get_route_map")) as unknown[];
-      expect(routes).toHaveLength(0);
+      const routeMap = (await callTool(dbPath, "graph_get_route_map")) as { routes: unknown[] };
+      expect(routeMap.routes).toHaveLength(0);
 
       const search = (await callTool(dbPath, "graph_search_symbol", { query: "GreetingController" })) as unknown[];
       expect(search).toHaveLength(0);
@@ -120,60 +148,82 @@ describe("end-to-end: rs-graph index + serve across every language fixture", () 
       expect(fs.existsSync(staleMarker)).toBe(false);
       const dbPath = path.join(rsGraphDir, "graph.db");
       const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number };
-      expect(stats.totalFiles).toBe(7);
+      expect(stats.totalFiles).toBe(15);
     },
     30_000,
   );
 
-  it("indexes and serves the Angular fixture via a real MCP tool call", async () => {
-    await runIndex(ANGULAR_FIXTURE);
-    const dbPath = path.join(ANGULAR_FIXTURE, ".rs-graph", "graph.db");
+  it(
+    "indexes and serves the Angular fixture via a real MCP tool call",
+    async () => {
+      await runIndex(ANGULAR_FIXTURE);
+      const dbPath = path.join(ANGULAR_FIXTURE, ".rs-graph", "graph.db");
 
-    const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
-    expect(stats.totalFiles).toBe(4);
-    expect(stats.byLanguage.typescript).toBe(4);
+      const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
+      // +1 for src/signal.service.ts (SignalR PUBLISHES/CONSUMES extraction fixture).
+      expect(stats.totalFiles).toBe(5);
+      expect(stats.byLanguage.typescript).toBe(5);
 
-    const components = (await callTool(dbPath, "graph_get_component_tree")) as Array<{ component: { name: string } }>;
-    expect(components.map((c) => c.component.name).sort()).toEqual(["AboutComponent", "AppComponent"]);
+      const componentTree = (await callTool(dbPath, "graph_get_component_tree")) as {
+        components: Array<{ component: { name: string } }>;
+      };
+      expect(componentTree.components.map((c) => c.component.name).sort()).toEqual(["AboutComponent", "AppComponent"]);
 
-    const search = (await callTool(dbPath, "graph_search_symbol", { query: "greet" })) as Array<{ id: string }>;
-    expect(search.some((s) => s.id === "typescript:src/greeter.service.ts#GreeterService.greet")).toBe(true);
-  });
+      const search = (await callTool(dbPath, "graph_search_symbol", { query: "greet" })) as Array<{ id: string }>;
+      expect(search.some((s) => s.id === "typescript:src/greeter.service.ts#GreeterService.greet")).toBe(true);
+    },
+    30_000,
+  );
 
-  it("indexes and serves the Python fixture via a real MCP tool call", async () => {
-    await runIndex(PYTHON_FIXTURE);
-    const dbPath = path.join(PYTHON_FIXTURE, ".rs-graph", "graph.db");
+  it(
+    "indexes and serves the Python fixture via a real MCP tool call",
+    async () => {
+      await runIndex(PYTHON_FIXTURE);
+      const dbPath = path.join(PYTHON_FIXTURE, ".rs-graph", "graph.db");
 
-    const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
-    expect(stats.totalFiles).toBe(5);
-    expect(stats.byLanguage.python).toBe(5);
+      const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
+      // +1 for api/messaging.py (PUBLISHES/CONSUMES extraction fixture).
+      expect(stats.totalFiles).toBe(6);
+      expect(stats.byLanguage.python).toBe(6);
 
-    const routes = (await callTool(dbPath, "graph_get_route_map")) as Array<{ route: { name: string }; handler: { id: string } | null }>;
-    expect(routes).toHaveLength(1);
-    expect(routes[0]?.route.name).toBe("GET /api/greeting/<name>");
+      const routeMap = (await callTool(dbPath, "graph_get_route_map")) as {
+        routes: Array<{ route: { name: string }; handler: { id: string } | null }>;
+      };
+      expect(routeMap.routes).toHaveLength(1);
+      expect(routeMap.routes[0]?.route.name).toBe("GET /api/greeting/<name>");
 
-    const callers = (await callTool(dbPath, "graph_get_callers", {
-      symbolId: "python:domain/greeter.py#IGreeter.greet",
-    })) as Array<{ symbol: { id: string } }>;
-    expect(callers.some((c) => c.symbol.id === "python:api/controller.py#GreetingController.get")).toBe(true);
-  });
+      const callers = (await callTool(dbPath, "graph_get_callers", {
+        symbolId: "python:domain/greeter.py#IGreeter.greet",
+      })) as Array<{ symbol: { id: string } }>;
+      expect(callers.some((c) => c.symbol.id === "python:api/controller.py#GreetingController.get")).toBe(true);
+    },
+    30_000,
+  );
 
-  it("indexes and serves the Aurelia fixture via a real MCP tool call", async () => {
-    await runIndex(AURELIA_FIXTURE);
-    const dbPath = path.join(AURELIA_FIXTURE, ".rs-graph", "graph.db");
+  it(
+    "indexes and serves the Aurelia fixture via a real MCP tool call",
+    async () => {
+      await runIndex(AURELIA_FIXTURE);
+      const dbPath = path.join(AURELIA_FIXTURE, ".rs-graph", "graph.db");
 
-    const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
-    expect(stats.totalFiles).toBe(5);
-    expect(stats.byLanguage.typescript).toBe(5);
+      const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
+      expect(stats.totalFiles).toBe(5);
+      expect(stats.byLanguage.typescript).toBe(5);
 
-    const components = (await callTool(dbPath, "graph_get_component_tree")) as Array<{ component: { name: string } }>;
-    expect(components.map((c) => c.component.name).sort()).toEqual(["About", "App", "Home"]);
+      const componentTree = (await callTool(dbPath, "graph_get_component_tree")) as {
+        components: Array<{ component: { name: string } }>;
+      };
+      expect(componentTree.components.map((c) => c.component.name).sort()).toEqual(["About", "App", "Home"]);
 
-    const routes = (await callTool(dbPath, "graph_get_route_map")) as Array<{ route: { name: string }; handler: { id: string } | null }>;
-    expect(routes.map((r) => r.handler?.id).sort()).toEqual(
-      ["typescript:src/about.ts#About", "typescript:src/home.ts#Home"].sort(),
-    );
-  });
+      const routeMap = (await callTool(dbPath, "graph_get_route_map")) as {
+        routes: Array<{ route: { name: string }; handler: { id: string } | null }>;
+      };
+      expect(routeMap.routes.map((r) => r.handler?.id).sort()).toEqual(
+        ["typescript:src/about.ts#About", "typescript:src/home.ts#Home"].sort(),
+      );
+    },
+    30_000,
+  );
 
   it("re-indexing either fixture is idempotent", async () => {
     await runIndex(DOTNET_FIXTURE);

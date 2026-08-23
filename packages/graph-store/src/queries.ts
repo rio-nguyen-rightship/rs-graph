@@ -71,11 +71,28 @@ export function getDefinitionAtLocation(
   return row ? toSymbolSummary(row) : undefined;
 }
 
-export function getFileOutline(db: GraphDb, filePath: string): SymbolSummary[] {
+export interface FileOutlineResult {
+  symbols: SymbolSummary[];
+  truncated: boolean;
+}
+
+/**
+ * A generated file (an NSwag API client, in one real case) can declare thousands of symbols —
+ * unbounded, this produced a 55,000+ character response even after compact mode. Capped at
+ * `limit` (default 200) with a `truncated` flag, same convention as impactAnalysis/contextPack.
+ */
+export function getFileOutline(
+  db: GraphDb,
+  filePath: string,
+  { limit = 200, offset = 0 }: PageOptions = {},
+): FileOutlineResult {
   const rows = db
-    .prepare(`SELECT ${SYMBOL_COLUMNS} FROM Symbol WHERE filePath = ? ORDER BY startLine ASC`)
-    .all(filePath) as SymbolRow[];
-  return rows.map(toSymbolSummary);
+    .prepare(`SELECT ${SYMBOL_COLUMNS} FROM Symbol WHERE filePath = ? ORDER BY startLine ASC LIMIT ? OFFSET ?`)
+    .all(filePath, limit, offset) as SymbolRow[];
+  const { n: totalCount } = db.prepare("SELECT COUNT(*) as n FROM Symbol WHERE filePath = ?").get(filePath) as {
+    n: number;
+  };
+  return { symbols: rows.map(toSymbolSummary), truncated: offset + rows.length < totalCount };
 }
 
 export interface SearchSymbolOptions {
@@ -83,12 +100,37 @@ export interface SearchSymbolOptions {
   kind?: string;
   language?: string;
   limit?: number;
+  /** "any" (default): matches name, signature, and docSummary together — the existing behavior,
+   * kept as default since real usage relies on it (e.g. finding a symbol by a word in its doc
+   * comment, not just its name). "name": scopes the match to the symbol's own name only, via
+   * FTS5's column-filter syntax — much more precise when the caller wants "things named X" and
+   * not "anything that merely mentions X in its signature/docs" (a generic search over all three
+   * columns matches any symbol whose signature happens to reference a same-named parameter/return
+   * type, which is a different, broader question). */
+  scope?: "name" | "any";
+}
+
+function isFtsSyntaxError(err: unknown): boolean {
+  return err instanceof Error && /fts5: syntax error/i.test(err.message);
+}
+
+/** Quotes a raw query as an FTS5 phrase, escaping embedded double quotes by doubling them (FTS5's
+ * own phrase-escaping rule) — this makes every character inside literal, so it's always valid
+ * syntax regardless of what the query contains. */
+function toFtsPhrase(query: string): string {
+  return `"${query.replaceAll('"', '""')}"`;
+}
+
+/** Applies FTS5's column-filter syntax ("name:query") when scoped to just the name column;
+ * passes the query through unchanged for the default "any"/unscoped case. */
+function scopedFtsQuery(query: string, scope: "name" | "any" | undefined): string {
+  return scope === "name" ? `name:${query}` : query;
 }
 
 export function searchSymbol(db: GraphDb, opts: SearchSymbolOptions): SymbolSummary[] {
   const limit = opts.limit ?? 20;
   const clauses: string[] = ["SymbolFts MATCH @query"];
-  const params: Record<string, unknown> = { query: opts.query, limit };
+  const params: Record<string, unknown> = { query: scopedFtsQuery(opts.query, opts.scope), limit };
   if (opts.kind) {
     clauses.push("s.kind = @kind");
     params.kind = opts.kind;
@@ -97,16 +139,27 @@ export function searchSymbol(db: GraphDb, opts: SearchSymbolOptions): SymbolSumm
     clauses.push("f.language = @language");
     params.language = opts.language;
   }
-  const rows = db
-    .prepare(
-      `SELECT s.${SYMBOL_COLUMNS.replaceAll(", ", ", s.")} FROM SymbolFts
-       JOIN Symbol s ON s.id = SymbolFts.id
-       JOIN File f ON f.path = s.filePath
-       WHERE ${clauses.join(" AND ")}
-       ORDER BY rank
-       LIMIT @limit`,
-    )
-    .all(params) as SymbolRow[];
+  const stmt = db.prepare(
+    `SELECT s.${SYMBOL_COLUMNS.replaceAll(", ", ", s.")} FROM SymbolFts
+     JOIN Symbol s ON s.id = SymbolFts.id
+     JOIN File f ON f.path = s.filePath
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY rank
+     LIMIT @limit`,
+  );
+
+  let rows: SymbolRow[];
+  try {
+    rows = stmt.all(params) as SymbolRow[];
+  } catch (err) {
+    if (!isFtsSyntaxError(err)) throw err;
+    // The query isn't valid FTS5 query syntax — most commonly because it's a real symbol
+    // name/signature fragment that happens to contain FTS5 operator characters (a generic type
+    // like "DbSet<Foo>", a qualified name with "::" or "-", etc.). Retry it as a literal phrase
+    // rather than surfacing a raw SQLite syntax error for what looks, to the caller, like an
+    // ordinary search term.
+    rows = stmt.all({ ...params, query: scopedFtsQuery(toFtsPhrase(opts.query), opts.scope) }) as SymbolRow[];
+  }
   return rows.map(toSymbolSummary);
 }
 
@@ -154,23 +207,51 @@ function referencesByEdgeTypes(
   // symbol itself is reached via an interface.
   const targetIds = direction === "callers" ? [symbolId, ...getPolymorphicAncestorIds(db, symbolId)] : [symbolId];
   const targetPlaceholders = targetIds.map(() => "?").join(",");
+  const whereClause = `e.${matchSide} IN (${targetPlaceholders}) AND e.edgeType IN (${edgePlaceholders})`;
 
-  const rows = db
+  // One row per *symbol*, not per call site — a caller with 5 call sites to the same target
+  // used to repeat its full signature/doc/etc. 5 times. GROUP BY s.id is safe here without
+  // wrapping every other selected column in an aggregate: they're all functionally dependent on
+  // s.id (same symbol row), so SQLite's relaxed GROUP BY can't pick inconsistent values for them.
+  const symbolRows = db
     .prepare(
-      `SELECT s.${SYMBOL_COLUMNS.replaceAll(", ", ", s.")}, e.line as _line, e.col as _col
+      `SELECT s.${SYMBOL_COLUMNS.replaceAll(", ", ", s.")}
        FROM Edge e JOIN Symbol s ON s.id = e.${selectSide}
-       WHERE e.${matchSide} IN (${targetPlaceholders}) AND e.edgeType IN (${edgePlaceholders})
+       WHERE ${whereClause}
+       GROUP BY s.id
        ORDER BY s.filePath, s.startLine
        LIMIT ? OFFSET ?`,
     )
-    .all(...targetIds, ...edgeTypes, limit, offset) as (SymbolRow & {
-    _line: number | null;
-    _col: number | null;
-  })[];
-  return rows.map((row) => ({
+    .all(...targetIds, ...edgeTypes, limit, offset) as SymbolRow[];
+  if (symbolRows.length === 0) return [];
+
+  // Pagination applies to the unique-symbol list above; this second query only needs to fetch
+  // occurrences for exactly the symbols that made the page, not re-run pagination itself.
+  const pageIds = symbolRows.map((row) => row.id);
+  const pagePlaceholders = pageIds.map(() => "?").join(",");
+  const occurrenceRows = db
+    .prepare(
+      `SELECT s.id as symbolId, e.line as line, e.col as col
+       FROM Edge e JOIN Symbol s ON s.id = e.${selectSide}
+       WHERE s.id IN (${pagePlaceholders}) AND ${whereClause}
+       ORDER BY e.line`,
+    )
+    .all(...pageIds, ...targetIds, ...edgeTypes) as {
+    symbolId: string;
+    line: number | null;
+    col: number | null;
+  }[];
+
+  const occurrencesBySymbolId = new Map<string, Array<{ line: number | null; col: number | null }>>();
+  for (const row of occurrenceRows) {
+    const list = occurrencesBySymbolId.get(row.symbolId) ?? [];
+    list.push({ line: row.line, col: row.col });
+    occurrencesBySymbolId.set(row.symbolId, list);
+  }
+
+  return symbolRows.map((row) => ({
     symbol: toSymbolSummary(row),
-    line: row._line,
-    col: row._col,
+    occurrences: occurrencesBySymbolId.get(row.id) ?? [],
   }));
 }
 
@@ -282,52 +363,138 @@ export function impactAnalysis(db: GraphDb, symbolId: string, depth = 3, maxResu
   };
 }
 
-export function getRouteMap(db: GraphDb): RouteMapping[] {
+export interface RouteMapResult {
+  routes: RouteMapping[];
+  truncated: boolean;
+}
+
+/** Previously unbounded — a real app's route count is usually modest, but "usually" isn't a
+ * safety guarantee (see getComponentTree's comment for the case that proved it). Same
+ * limit/offset/truncated convention as everywhere else now. */
+export function getRouteMap(db: GraphDb, { limit = 200, offset = 0 }: PageOptions = {}): RouteMapResult {
+  const { n: totalCount } = db.prepare("SELECT COUNT(*) as n FROM Symbol WHERE kind = 'Route'").get() as {
+    n: number;
+  };
   const rows = db
     .prepare(
       `SELECT r.${SYMBOL_COLUMNS.replaceAll(", ", ", r.")}, e.toId as handlerId
        FROM Symbol r LEFT JOIN Edge e ON e.fromId = r.id AND e.edgeType = 'ROUTES_TO'
-       WHERE r.kind = 'Route'`,
+       WHERE r.kind = 'Route'
+       ORDER BY r.filePath, r.startLine
+       LIMIT ? OFFSET ?`,
     )
-    .all() as (SymbolRow & { handlerId: string | null })[];
-  return rows.map((row) => ({
-    route: toSymbolSummary(row),
-    handler: row.handlerId ? (getSymbolById(db, row.handlerId) ?? null) : null,
-  }));
+    .all(limit, offset) as (SymbolRow & { handlerId: string | null })[];
+  return {
+    routes: rows.map((row) => ({
+      route: toSymbolSummary(row),
+      handler: row.handlerId ? (getSymbolById(db, row.handlerId) ?? null) : null,
+    })),
+    truncated: offset + rows.length < totalCount,
+  };
 }
 
-export function getDiGraph(db: GraphDb): DiRegistration[] {
+export interface DiGraphResult {
+  registrations: DiRegistration[];
+  truncated: boolean;
+}
+
+export function getDiGraph(db: GraphDb, { limit = 200, offset = 0 }: PageOptions = {}): DiGraphResult {
+  const { n: totalCount } = db.prepare("SELECT COUNT(*) as n FROM Symbol WHERE kind = 'DIRegistration'").get() as {
+    n: number;
+  };
   const rows = db
     .prepare(
       `SELECT d.${SYMBOL_COLUMNS.replaceAll(", ", ", d.")}, e.toId as targetId
        FROM Symbol d LEFT JOIN Edge e ON e.fromId = d.id AND e.edgeType = 'REGISTERS'
-       WHERE d.kind = 'DIRegistration'`,
+       WHERE d.kind = 'DIRegistration'
+       ORDER BY d.filePath, d.startLine
+       LIMIT ? OFFSET ?`,
     )
-    .all() as (SymbolRow & { targetId: string | null })[];
-  return rows.map((row) => ({
-    registration: toSymbolSummary(row),
-    target: row.targetId ? (getSymbolById(db, row.targetId) ?? null) : null,
-  }));
+    .all(limit, offset) as (SymbolRow & { targetId: string | null })[];
+  return {
+    registrations: rows.map((row) => ({
+      registration: toSymbolSummary(row),
+      target: row.targetId ? (getSymbolById(db, row.targetId) ?? null) : null,
+    })),
+    truncated: offset + rows.length < totalCount,
+  };
 }
 
-export function getComponentTree(db: GraphDb): ComponentBinding[] {
-  const components = db
-    .prepare("SELECT id, name, selector, framework, templatePath FROM Component").all() as {
-    id: string;
-    name: string;
-    selector: string | null;
-    framework: string;
-    templatePath: string | null;
-  }[];
+export interface ComponentTreeResult {
+  components: ComponentBinding[];
+  truncated: boolean;
+}
+
+/**
+ * Previously unbounded on two axes at once — component count AND each component's full-detail
+ * boundSymbols list — which produced an actual 5,091,624-character response against a real
+ * Angular app with hundreds of components. Paginates over components (limit/offset/truncated,
+ * same as everywhere else); each component's own boundSymbols isn't separately paginated (a
+ * second pagination dimension nested inside the first) but does shrink a lot under the caller's
+ * `detail` choice at the mcp-server layer, same as every other list tool.
+ */
+export interface ComponentTreeOptions extends PageOptions {
+  /** Fetch exactly one component's binding info by id, bypassing the outer list's limit/offset
+   * entirely — the precise, cheap way to ask "what does this one component bind to" instead of
+   * paging through every component in the repo to find it. Still subject to maxBoundSymbols. */
+  componentId?: string;
+  /** Caps each component's own boundSymbols list (default 15). Component *count* isn't the only
+   * thing that can make this response huge — a single template-heavy component (a big form, in
+   * practice) can bind to far more members than a typical one, so this bounds the worst case per
+   * row, not just the number of rows. */
+  maxBoundSymbols?: number;
+}
+
+/**
+ * Real-world data point behind the defaults here: against an actual Angular app, limit=500
+ * produced a 1,750,937-character response — about 3,500 characters per component even in
+ * compact mode, almost entirely from unbounded per-component boundSymbols lists. `pageArgs`'s
+ * generic max(500) (fine for lighter list tools) was itself unsafe for this one specifically, so
+ * this tool now has its own, much smaller bounds on both axes: how many components, and how much
+ * each one can carry.
+ */
+export function getComponentTree(
+  db: GraphDb,
+  { limit = 15, offset = 0, componentId, maxBoundSymbols = 15 }: ComponentTreeOptions = {},
+): ComponentTreeResult {
+  type ComponentRow = { id: string; name: string; selector: string | null; framework: string; templatePath: string | null };
+
+  let componentRows: ComponentRow[];
+  let totalCount: number;
+  if (componentId) {
+    componentRows = db
+      .prepare("SELECT id, name, selector, framework, templatePath FROM Component WHERE id = ?")
+      .all(componentId) as ComponentRow[];
+    totalCount = componentRows.length;
+  } else {
+    totalCount = (db.prepare("SELECT COUNT(*) as n FROM Component").get() as { n: number }).n;
+    componentRows = db
+      .prepare("SELECT id, name, selector, framework, templatePath FROM Component ORDER BY name LIMIT ? OFFSET ?")
+      .all(limit, offset) as ComponentRow[];
+  }
+
+  const boundCountStmt = db.prepare(
+    "SELECT COUNT(*) as n FROM Edge WHERE fromId = ? AND edgeType = 'BINDS_TEMPLATE'",
+  );
   const boundStmt = db.prepare(
     `SELECT s.${SYMBOL_COLUMNS.replaceAll(", ", ", s.")} FROM Edge e
      JOIN Symbol s ON s.id = e.toId
-     WHERE e.fromId = ? AND e.edgeType = 'BINDS_TEMPLATE'`,
+     WHERE e.fromId = ? AND e.edgeType = 'BINDS_TEMPLATE'
+     LIMIT ?`,
   );
-  return components.map((component) => ({
-    component,
-    boundSymbols: (boundStmt.all(component.id) as SymbolRow[]).map(toSymbolSummary),
-  }));
+
+  return {
+    components: componentRows.map((component) => {
+      const totalBound = (boundCountStmt.get(component.id) as { n: number }).n;
+      const boundRows = boundStmt.all(component.id, maxBoundSymbols) as SymbolRow[];
+      return {
+        component,
+        boundSymbols: boundRows.map(toSymbolSummary),
+        boundSymbolsTruncated: totalBound > boundRows.length,
+      };
+    }),
+    truncated: componentId ? false : offset + componentRows.length < totalCount,
+  };
 }
 
 export function getStats(db: GraphDb): GraphStats {

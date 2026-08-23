@@ -87,6 +87,35 @@ def test_import_edges_resolve_to_owned_files(records):
     assert has_edge(records, "IMPORTS", "app.py", "api/controller.py")
 
 
+def test_extracts_publishes_edge_from_a_send_message_call_site(records):
+    # publish_voyage_checklists_generated calls bus.send_message(..., "TypeName") — this org's
+    # internal Service Bus wrapper shape. The edge target is the normalized
+    # xrepo:message:{TypeName} key, matching indexer-dotnet's MessageUtils exactly (see the
+    # shared key-parity table), not a Python-specific id — there's no compile-time symbol Python
+    # could compute for a message contract class declared in a different language's repo.
+    assert has_edge(
+        records,
+        "PUBLISHES",
+        "python:api/messaging.py#publish_voyage_checklists_generated",
+        "xrepo:message:VoyageChecklistsGeneratedMessage",
+    )
+
+
+def test_extracts_consumes_edge_from_an_enclosed_message_type_dispatch_branch(records):
+    assert has_edge(
+        records,
+        "CONSUMES",
+        "python:api/messaging.py#handle_incoming_message",
+        "xrepo:message:VoyageChecklistsGeneratedMessage",
+    )
+
+
+def test_emits_one_message_contract_symbol_shared_by_publisher_and_consumer(records):
+    contract = find_symbol(records, "xrepo:message:VoyageChecklistsGeneratedMessage")
+    assert contract["kind"] == "MessageContract"
+    assert contract["name"] == "VoyageChecklistsGeneratedMessage"
+
+
 def test_idempotent_ids_across_runs(records):
     second_run = []
     run(FIXTURE_ROOT, FIXTURE_ROOT, lambda record: second_run.append(record))

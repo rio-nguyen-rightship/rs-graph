@@ -17,6 +17,7 @@
     "@rs-graph/graph-store": "0.1.0",
     "@rs-graph/indexer-typescript": "0.1.0",
     "@rs-graph/mcp-server": "0.1.0",
+    "@rs-graph/workspace-store": "0.1.0",
     "chokidar": "^5.0.0",
     "commander": "^13.1.0"
   },

@@ -222,7 +222,14 @@ describe("graph-store", () => {
 
   it("returns a file outline ordered by line", () => {
     const outline = getFileOutline(db, "src/Bar.cs");
-    expect(outline.map((s) => s.name)).toEqual(["Bar", "GET /bar", "doStuff"]);
+    expect(outline.symbols.map((s) => s.name)).toEqual(["Bar", "GET /bar", "doStuff"]);
+    expect(outline.truncated).toBe(false);
+  });
+
+  it("caps a file outline at limit and reports truncated", () => {
+    const outline = getFileOutline(db, "src/Bar.cs", { limit: 2 });
+    expect(outline.symbols).toHaveLength(2);
+    expect(outline.truncated).toBe(true);
   });
 
   it("finds the definition at a given file location, preferring the most nested span", () => {
@@ -235,6 +242,40 @@ describe("graph-store", () => {
     expect(results.map((s) => s.id)).toContain("Bar.doStuff");
   });
 
+  it("scope: 'name' restricts matching to the symbol's own name, excluding signature/doc hits", () => {
+    // "stuff" only appears in Bar.doStuff's docSummary ("Does stuff.") — its name "doStuff"
+    // tokenizes as one word and never contains "stuff" as its own token, so a name-scoped search
+    // must NOT match it, unlike the unscoped default above.
+    expect(searchSymbol(db, { query: "stuff", scope: "name" }).map((s) => s.id)).not.toContain("Bar.doStuff");
+    // A real name match still works under the same scope.
+    expect(searchSymbol(db, { query: "doStuff", scope: "name" }).map((s) => s.id)).toContain("Bar.doStuff");
+  });
+
+  it("falls back to a literal phrase match instead of throwing on FTS5 syntax characters", () => {
+    ingestGraphRecords(db, [
+      { record: "file", path: "src/Repo.cs", language: "csharp", contentHash: "hgen", sizeBytes: 40 },
+      {
+        record: "symbol",
+        id: "Repo.RS_PscInspection",
+        name: "RS_PscInspection",
+        kind: "Property",
+        signature: "public DbSet<RS_PscInspection> RS_PscInspection { get; set; }",
+        filePath: "src/Repo.cs",
+        startLine: 1,
+        endLine: 1,
+        modifiers: ["public"],
+        external: false,
+      },
+    ]);
+
+    // A raw query of "DbSet<RS_PscInspection>" is not valid FTS5 syntax on its own ("<" is a
+    // syntax error) — a real symbol signature containing a generic type is a common real case,
+    // not an edge case, so this must match rather than throw.
+    expect(() => searchSymbol(db, { query: "DbSet<RS_PscInspection>" })).not.toThrow();
+    const results = searchSymbol(db, { query: "DbSet<RS_PscInspection>" });
+    expect(results.map((s) => s.id)).toContain("Repo.RS_PscInspection");
+  });
+
   it("finds callers and callees across a CALLS edge", () => {
     expect(getCallers(db, "Foo.baseMethod").map((r) => r.symbol.id)).toEqual(["Bar.doStuff"]);
     expect(getCallees(db, "Bar.doStuff").map((r) => r.symbol.id).sort()).toEqual(["Foo.baseMethod", "IFoo.doWork"]);
@@ -243,7 +284,7 @@ describe("graph-store", () => {
   it("includes both CALLS and REFERENCES in getReferences", () => {
     const refs = getReferences(db, "Foo.baseMethod");
     expect(refs).toHaveLength(1);
-    expect(refs[0]?.line).toBe(6);
+    expect(refs[0]?.occurrences).toEqual([{ line: 6, col: null }]);
   });
 
   it("finds callers of a concrete method reached only through the interface it implements", () => {
@@ -284,23 +325,91 @@ describe("graph-store", () => {
   });
 
   it("maps routes to their handler symbol", () => {
-    const routes = getRouteMap(db);
-    expect(routes).toHaveLength(1);
-    expect(routes[0]?.route.id).toBe("Route.GetBar");
-    expect(routes[0]?.handler?.id).toBe("Bar.doStuff");
+    const result = getRouteMap(db);
+    expect(result.routes).toHaveLength(1);
+    expect(result.routes[0]?.route.id).toBe("Route.GetBar");
+    expect(result.routes[0]?.handler?.id).toBe("Bar.doStuff");
+    expect(result.truncated).toBe(false);
   });
 
   it("maps DI registrations to their target symbol", () => {
-    const registrations = getDiGraph(db);
-    expect(registrations).toHaveLength(1);
-    expect(registrations[0]?.target?.id).toBe("Foo");
+    const result = getDiGraph(db);
+    expect(result.registrations).toHaveLength(1);
+    expect(result.registrations[0]?.target?.id).toBe("Foo");
+    expect(result.truncated).toBe(false);
   });
 
   it("maps components to their template-bound symbols", () => {
-    const tree = getComponentTree(db);
-    expect(tree).toHaveLength(1);
-    expect(tree[0]?.component.selector).toBe("app-root");
-    expect(tree[0]?.boundSymbols.map((s) => s.id)).toEqual(["AppComponent.title"]);
+    const result = getComponentTree(db);
+    expect(result.components).toHaveLength(1);
+    expect(result.components[0]?.component.selector).toBe("app-root");
+    expect(result.components[0]?.boundSymbols.map((s) => s.id)).toEqual(["AppComponent.title"]);
+    expect(result.components[0]?.boundSymbolsTruncated).toBe(false);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("componentId fetches just one component, bypassing limit/offset entirely", () => {
+    ingestGraphRecords(db, [
+      { record: "file", path: "src/other.component.ts", language: "typescript", contentHash: "hother", sizeBytes: 10 },
+      {
+        record: "symbol",
+        id: "OtherComponent",
+        name: "OtherComponent",
+        kind: "Class",
+        signature: "class OtherComponent",
+        filePath: "src/other.component.ts",
+        startLine: 1,
+        endLine: 5,
+        modifiers: [],
+        external: false,
+      },
+      { record: "edge", edgeType: "DEFINES", from: "src/other.component.ts", to: "OtherComponent" },
+      { record: "component", id: "OtherComponent", name: "OtherComponent", selector: "app-other", framework: "angular" },
+    ]);
+
+    // limit: 0 would return nothing from a normal list — componentId ignores it entirely.
+    const result = getComponentTree(db, { componentId: "OtherComponent", limit: 0 });
+    expect(result.components).toHaveLength(1);
+    expect(result.components[0]?.component.id).toBe("OtherComponent");
+    expect(result.truncated).toBe(false);
+  });
+
+  it("caps boundSymbols per component (independent of the component-count limit) and reports boundSymbolsTruncated", () => {
+    const bigComponent: GraphRecord[] = [
+      { record: "file", path: "src/big.component.ts", language: "typescript", contentHash: "hbig", sizeBytes: 10 },
+      {
+        record: "symbol",
+        id: "BigComponent",
+        name: "BigComponent",
+        kind: "Class",
+        signature: "class BigComponent",
+        filePath: "src/big.component.ts",
+        startLine: 1,
+        endLine: 20,
+        modifiers: [],
+        external: false,
+      },
+      { record: "symbol", id: "BigComponent.a", name: "a", kind: "Property", signature: "a", filePath: "src/big.component.ts", startLine: 2, endLine: 2, modifiers: [], external: false },
+      { record: "symbol", id: "BigComponent.b", name: "b", kind: "Property", signature: "b", filePath: "src/big.component.ts", startLine: 3, endLine: 3, modifiers: [], external: false },
+      { record: "symbol", id: "BigComponent.c", name: "c", kind: "Property", signature: "c", filePath: "src/big.component.ts", startLine: 4, endLine: 4, modifiers: [], external: false },
+      { record: "edge", edgeType: "DEFINES", from: "src/big.component.ts", to: "BigComponent" },
+      { record: "edge", edgeType: "DEFINES", from: "src/big.component.ts", to: "BigComponent.a" },
+      { record: "edge", edgeType: "DEFINES", from: "src/big.component.ts", to: "BigComponent.b" },
+      { record: "edge", edgeType: "DEFINES", from: "src/big.component.ts", to: "BigComponent.c" },
+      { record: "component", id: "BigComponent", name: "BigComponent", selector: "app-big", framework: "angular" },
+      { record: "edge", edgeType: "BINDS_TEMPLATE", from: "BigComponent", to: "BigComponent.a" },
+      { record: "edge", edgeType: "BINDS_TEMPLATE", from: "BigComponent", to: "BigComponent.b" },
+      { record: "edge", edgeType: "BINDS_TEMPLATE", from: "BigComponent", to: "BigComponent.c" },
+    ];
+    ingestGraphRecords(db, bigComponent);
+
+    const capped = getComponentTree(db, { componentId: "BigComponent", maxBoundSymbols: 2 });
+    expect(capped.components[0]?.boundSymbols).toHaveLength(2);
+    expect(capped.components[0]?.boundSymbolsTruncated).toBe(true);
+
+    const uncapped = getComponentTree(db, { componentId: "BigComponent", maxBoundSymbols: 10 });
+    expect(uncapped.components[0]?.boundSymbols).toHaveLength(3);
+    expect(uncapped.components[0]?.boundSymbolsTruncated).toBe(false);
   });
 
   it("builds a bounded context pack around seed symbols", () => {
@@ -340,8 +449,8 @@ describe("graph-store", () => {
 
     // Bar.doStuff and the route symbol were dropped from the new batch for this file,
     // so they should be gone; Foo (a different, unchanged file) must be untouched.
-    expect(getFileOutline(db, "src/Bar.cs").map((s) => s.id)).toEqual(["Bar"]);
-    expect(getFileOutline(db, "src/Foo.cs").map((s) => s.id)).toEqual(["Foo", "Foo.baseMethod", "Foo.doWork"]);
+    expect(getFileOutline(db, "src/Bar.cs").symbols.map((s) => s.id)).toEqual(["Bar"]);
+    expect(getFileOutline(db, "src/Foo.cs").symbols.map((s) => s.id)).toEqual(["Foo", "Foo.baseMethod", "Foo.doWork"]);
   });
 
   it("dedupes a symbol id that appears as both an owned declaration and an external stub", () => {
@@ -387,6 +496,111 @@ describe("graph-store", () => {
     expect(getStats(db).totalSymbols).toBe(12); // 11 from FIXTURE + 1 deduped (not 2) for the collided id
   });
 
+  it("dedupes a MessageContract/HubEvent symbol id shared across two languages' separate ingest batches", () => {
+    // Real-world regression (found indexing psc-riskiq-app): a C# backend publishes a SignalR
+    // event and a TypeScript frontend in the *same repo* consumes it. Each language's indexer
+    // runs and ingests as its own separate batch (indexRepo.ts calls ingestGraphRecords once per
+    // detected language) — MessageContract/HubEvent ids are deliberately language-agnostic
+    // (xrepo:signal:.../xrepo:message:...) so a cross-*repo* join can match them verbatim, but
+    // that same property means each language's indexer independently and correctly decides "I
+    // haven't seen this key yet" and both try to insert it. Without dedup, the second batch's
+    // insert violates Symbol.id's PRIMARY KEY and the whole ingest fails.
+    const csharpBatch: GraphRecord[] = [
+      { record: "file", path: "src/Publisher.cs", language: "csharp", contentHash: "hp1", sizeBytes: 10 },
+      {
+        record: "symbol",
+        id: "Publisher.Publish",
+        name: "Publish",
+        kind: "Method",
+        signature: "public void Publish()",
+        filePath: "src/Publisher.cs",
+        startLine: 10,
+        endLine: 10,
+        modifiers: ["public"],
+        external: false,
+      },
+      {
+        record: "symbol",
+        id: "xrepo:signal:checklistGenerationCompleted",
+        name: "checklistGenerationCompleted",
+        kind: "HubEvent",
+        signature: "checklistGenerationCompleted",
+        filePath: "src/Publisher.cs",
+        startLine: 10,
+        endLine: 10,
+        modifiers: [],
+        external: false,
+      },
+      {
+        record: "edge",
+        edgeType: "PUBLISHES",
+        from: "Publisher.Publish",
+        to: "xrepo:signal:checklistGenerationCompleted",
+        line: 10,
+        col: 1,
+      },
+    ];
+    const typescriptBatch: GraphRecord[] = [
+      {
+        record: "file",
+        path: "src/consumer.component.ts",
+        language: "typescript",
+        contentHash: "ht1",
+        sizeBytes: 10,
+      },
+      {
+        record: "symbol",
+        id: "typescript:src/consumer.component.ts#Consumer.onEvent",
+        name: "onEvent",
+        kind: "Method",
+        signature: "onEvent(): void",
+        filePath: "src/consumer.component.ts",
+        startLine: 5,
+        endLine: 5,
+        modifiers: ["public"],
+        external: false,
+      },
+      {
+        record: "symbol",
+        id: "xrepo:signal:checklistGenerationCompleted",
+        name: "checklistGenerationCompleted",
+        kind: "HubEvent",
+        signature: "checklistGenerationCompleted",
+        filePath: "src/consumer.component.ts",
+        startLine: 5,
+        endLine: 5,
+        modifiers: [],
+        external: false,
+      },
+      {
+        record: "edge",
+        edgeType: "CONSUMES",
+        from: "typescript:src/consumer.component.ts#Consumer.onEvent",
+        to: "xrepo:signal:checklistGenerationCompleted",
+        line: 5,
+        col: 1,
+      },
+    ];
+
+    ingestGraphRecords(db, csharpBatch);
+    expect(() => ingestGraphRecords(db, typescriptBatch)).not.toThrow();
+
+    // Exactly one Symbol row — first batch's insert wins, matching the same "first wins"
+    // semantics as the in-batch dedup above.
+    const symbol = getSymbolById(db, "xrepo:signal:checklistGenerationCompleted");
+    expect(symbol?.filePath).toBe("src/Publisher.cs");
+
+    // Both edges are present regardless — the point of this feature is visible even within one
+    // repo: this backend publishes the event, this frontend consumes it.
+    const edges = db
+      .prepare("SELECT fromId, edgeType FROM Edge WHERE toId = ? ORDER BY edgeType")
+      .all("xrepo:signal:checklistGenerationCompleted") as { fromId: string; edgeType: string }[];
+    expect(edges).toEqual([
+      { fromId: "typescript:src/consumer.component.ts#Consumer.onEvent", edgeType: "CONSUMES" },
+      { fromId: "Publisher.Publish", edgeType: "PUBLISHES" },
+    ]);
+  });
+
   it("redacts likely secrets out of signatures and doc summaries before persisting", () => {
     const withSecret: GraphRecord[] = [
       { record: "file", path: "src/Startup.cs", language: "csharp", contentHash: "hs", sizeBytes: 5 },
@@ -407,7 +621,7 @@ describe("graph-store", () => {
     ];
     ingestGraphRecords(db, withSecret);
 
-    const symbol = getFileOutline(db, "src/Startup.cs")[0];
+    const symbol = getFileOutline(db, "src/Startup.cs").symbols[0];
     expect(symbol?.signature).not.toContain("hunter2");
     expect(symbol?.signature).toContain("password=[REDACTED]");
     expect(symbol?.docSummary).not.toContain("sk-abc123def456");
