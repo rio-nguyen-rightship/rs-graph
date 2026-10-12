@@ -39,13 +39,19 @@ public static class Runner
             .ToList();
 
         var ordered = ProjectLoader.TopologicalSort(loaded);
+        var byPath = ordered.ToDictionary(p => p.ProjectPath, StringComparer.OrdinalIgnoreCase);
         var compilationsByProjectPath = new Dictionary<string, CSharpCompilation>(StringComparer.OrdinalIgnoreCase);
+        // Shared across every project below — see ReferenceResolver.Resolve's doc comment for
+        // why re-resolving the same BCL/NuGet dll into a fresh MetadataReference per project
+        // breaks generic type resolution across project boundaries.
+        var referenceCache = new Dictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var project in ordered)
         {
-            var references = ReferenceResolver.Resolve(project);
+            var references = ReferenceResolver.Resolve(project, referenceCache);
 
-            foreach (var refPath in project.ProjectReferences)
+            // Transitive, not just direct, references — see GetTransitiveProjectReferences.
+            foreach (var refPath in ProjectLoader.GetTransitiveProjectReferences(project, byPath))
             {
                 if (compilationsByProjectPath.TryGetValue(refPath, out var refCompilation))
                 {
@@ -61,7 +67,12 @@ public static class Runner
                 }
             }
 
-            var syntaxTrees = project.CompileItems
+            // ImplicitUsingsFile joins the compilation (so its `global using` directives take
+            // effect everywhere) but not `owned` below — see LoadedProject.ImplicitUsingsFile.
+            var compileItemsWithImplicitUsings = project.ImplicitUsingsFile is { } implicitUsingsFile
+                ? [.. project.CompileItems, implicitUsingsFile]
+                : project.CompileItems;
+            var syntaxTrees = compileItemsWithImplicitUsings
                 .Select(path => CSharpSyntaxTree.ParseText(File.ReadAllText(path), path: path))
                 .ToList<SyntaxTree>();
 

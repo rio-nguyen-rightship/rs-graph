@@ -202,11 +202,44 @@ public sealed class SampleApiIndexerTests(SampleApiFixture fixture) : IClassFixt
         // resolves attributes by name regardless of which assembly declares them, so this
         // exercises the same path the real internal NuGet attribute would. The edge target is a
         // verb-less, normalized cross-repo join key (RouteUtils.BuildCrossRepoRouteKey), not a
-        // real Symbol id — no Symbol row for it exists in this fixture's own graph.
+        // real Symbol id — no Symbol row for it exists in this fixture's own graph. The `{}`
+        // placeholder (not `{vesselid}`) is deliberate — see RouteUtils.NormalizeTemplate: routes
+        // match by path shape, not by the route parameter's own name, since a hand-written
+        // HttpClient call site's local variable name never has any reason to match it.
         Assert.True(HasEdge(
             "INVOKES_ROUTE",
             "csharp:global::SampleApi.Api.VesselLookupService.LookupAsync(int)",
-            "xrepo:route:api/v1/vessel/getvesselheader/{vesselid}"));
+            "xrepo:route:api/v1/vessel/getvesselheader/{}"));
+    }
+
+    [Fact]
+    public void ExtractsInvokesRouteEdgeFromARawHttpClientCallSite()
+    {
+        // VesselRawHttpClientLookup calls HttpClient.GetAsync directly — no generated NSwag
+        // client, no [RouteUrl] attribute to read at all. The interpolated {vesselId} slot
+        // collapses to the same {} placeholder RouteUtils.NormalizeTemplate uses for a producer's
+        // own {id}-style route parameter, since the caller's local variable name has no reason to
+        // match it.
+        Assert.True(HasEdge(
+            "INVOKES_ROUTE",
+            "csharp:global::SampleApi.Api.VesselRawHttpClientLookup.LookupAsync(int)",
+            "xrepo:route:api/v1/vessel/{}"));
+    }
+
+    [Fact]
+    public void ResolvesACallThroughAnInterfaceMethodThatReliesOnAnImplicitUsing()
+    {
+        // Domain/AsyncGreeter.cs has no explicit `using System.Threading.Tasks;` at all — its
+        // Task<string> return type only resolves via <ImplicitUsings>enable</ImplicitUsings>'s
+        // auto-generated GlobalUsings.g.cs file (see ProjectLoader.Load). End-to-end coverage for
+        // that pattern; ProjectLoaderTests has the precise regression guard — in this small a
+        // fixture, Roslyn's error recovery is lenient enough that the CALLS edge below still
+        // resolves even with that file left out entirely (the real repo where this was found had
+        // hundreds of cascading errors in one compilation; a 3-file one doesn't reproduce that).
+        Assert.True(HasEdge(
+            "CALLS",
+            "csharp:global::SampleApi.Api.AsyncGreeterConsumer.GreetAsync(string)",
+            "csharp:global::SampleApi.Domain.IAsyncGreeter.GreetAsync(string)"));
     }
 
     [Fact]

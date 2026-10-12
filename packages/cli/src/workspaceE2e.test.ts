@@ -41,6 +41,8 @@ describe("workspace cross-repo resolution against fixtures/sample-workspace", ()
     for (const repo of [PRODUCER_REPO, CONSUMER_REPO]) {
       fs.rmSync(path.join(repo, ".rs-graph"), { recursive: true, force: true });
       fs.rmSync(path.join(repo, ".mcp.json"), { force: true });
+      fs.rmSync(path.join(repo, "CROSS_REPO_MANIFEST.md"), { force: true });
+      fs.rmSync(path.join(repo, "CROSS_REPO_MANIFEST.json"), { force: true });
     }
     fs.rmSync(path.join(WORKSPACE_FIXTURE, ".mcp.json"), { force: true });
   });
@@ -76,22 +78,34 @@ describe("workspace cross-repo resolution against fixtures/sample-workspace", ()
       }
 
       // A session opened at the workspace root itself (not inside any one repo) needs its own
-      // .mcp.json too — path here is just the file's own basename, since it lives in this folder.
+      // .mcp.json too — absolute paths here, since a session opened in some repo can still pick
+      // up this file and a relative path would resolve against that repo's cwd instead.
       const rootMcpConfig = JSON.parse(fs.readFileSync(path.join(WORKSPACE_FIXTURE, ".mcp.json"), "utf8"));
       expect(rootMcpConfig.mcpServers["rs-graph-workspace"]).toEqual({
         command: "rs-graph",
-        args: ["serve-workspace", "workspace.json"],
+        args: ["serve-workspace", path.resolve(WORKSPACE_CONFIG_PATH)],
       });
       // Plus one uniquely-named single-repo server per repo, so a root-level session still has
       // real structural tools for each repo — not just the cross-repo joins.
       expect(rootMcpConfig.mcpServers["rs-graph-producer-api"]).toEqual({
         command: "rs-graph",
-        args: ["serve", "producer-api"],
+        args: ["serve", path.resolve(PRODUCER_REPO)],
       });
       expect(rootMcpConfig.mcpServers["rs-graph-consumer-api"]).toEqual({
         command: "rs-graph",
-        args: ["serve", "consumer-api"],
+        args: ["serve", path.resolve(CONSUMER_REPO)],
       });
+
+      // runIndexWorkspace also regenerates each indexed repo's CROSS_REPO_MANIFEST.md/.json —
+      // real end-to-end proof the wiring works, not just the pure manifest-building unit tests.
+      const producerManifest = fs.readFileSync(path.join(PRODUCER_REPO, "CROSS_REPO_MANIFEST.md"), "utf8");
+      expect(producerManifest).toContain("# Cross-repo integration surface: producer-api");
+      expect(producerManifest).toContain("## Routes this repo defines");
+      expect(producerManifest).toContain("consumer-api");
+
+      const consumerManifest = fs.readFileSync(path.join(CONSUMER_REPO, "CROSS_REPO_MANIFEST.md"), "utf8");
+      expect(consumerManifest).toContain("# Cross-repo integration surface: consumer-api");
+      expect(consumerManifest).toContain("## Routes this repo calls in other repos");
     },
     60_000,
   );
@@ -102,10 +116,12 @@ describe("workspace cross-repo resolution against fixtures/sample-workspace", ()
     expect(index.skippedRepos).toEqual([]);
 
     // The producer's real, verb-prefixed Route id — RouteUtils.BuildRouteId("GET", "api/v1/vessel/{id}").
-    const producerRouteId = "csharp:route:GET:api/v1/vessel/{id}";
+    // NormalizeTemplate collapses the {id} placeholder to {} — routes match by path shape, not by
+    // the route parameter's own name (see RouteUtils.NormalizeTemplate).
+    const producerRouteId = "csharp:route:GET:api/v1/vessel/{}";
     const result = lookupCrossRepo(index, "Route", producerRouteId);
 
-    expect(result.key).toBe("xrepo:route:api/v1/vessel/{id}");
+    expect(result.key).toBe("xrepo:route:api/v1/vessel/{}");
     expect(result.owners).toEqual([
       expect.objectContaining({ repo: "producer-api", symbolId: producerRouteId, kind: "Route" }),
     ]);
@@ -147,14 +163,14 @@ describe("workspace cross-repo resolution against fixtures/sample-workspace", ()
     const index = buildCrossRepoIndex(config.repos);
 
     const server = new McpServer({ name: "rs-graph-workspace-test", version: "0.0.0" });
-    registerWorkspaceTools(server, index);
+    registerWorkspaceTools(server, () => index);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "workspace-e2e-test", version: "0.0.0" });
     await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
 
     const routeResult = await client.callTool({
       name: "graph_workspace_route_consumers",
-      arguments: { symbolId: "csharp:route:GET:api/v1/vessel/{id}" },
+      arguments: { symbolId: "csharp:route:GET:api/v1/vessel/{}" },
     });
     const routeContent = routeResult.content as Array<{ type: string; text: string }>;
     const routeParsed = JSON.parse(routeContent[0]!.text) as { references: Array<{ repo: string }> };
@@ -192,7 +208,7 @@ describe("workspace cross-repo resolution against fixtures/sample-workspace", ()
     const config = loadWorkspaceConfig(WORKSPACE_CONFIG_PATH);
     const index = buildCrossRepoIndex(config.repos);
     const workspaceServer = new McpServer({ name: "rs-graph-workspace-test", version: "0.0.0" });
-    registerWorkspaceTools(workspaceServer, index);
+    registerWorkspaceTools(workspaceServer, () => index);
     const [workspaceClientTransport, workspaceServerTransport] = InMemoryTransport.createLinkedPair();
     const workspaceClient = new Client({ name: "workspace-session", version: "0.0.0" });
     await Promise.all([workspaceClient.connect(workspaceClientTransport), workspaceServer.connect(workspaceServerTransport)]);

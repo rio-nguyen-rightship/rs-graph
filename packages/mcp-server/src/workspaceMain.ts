@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { buildCrossRepoIndex, loadWorkspaceConfig } from "@rs-graph/workspace-store";
+import { createLiveCrossRepoIndex, loadWorkspaceConfig } from "@rs-graph/workspace-store";
 import { registerWorkspaceTools } from "./workspaceTools.js";
 
 async function main(): Promise<void> {
@@ -12,16 +12,17 @@ async function main(): Promise<void> {
   }
 
   const config = loadWorkspaceConfig(workspaceConfigPath);
-  const index = buildCrossRepoIndex(config.repos);
-  if (index.skippedRepos.length > 0) {
+  const getIndex = createLiveCrossRepoIndex(config.repos);
+  const initial = getIndex();
+  if (initial.skippedRepos.length > 0) {
     console.error(
-      `rs-graph: skipping repo(s) not yet indexed: ${index.skippedRepos.join(", ")} — run ` +
+      `rs-graph: skipping repo(s) not yet indexed: ${initial.skippedRepos.join(", ")} — run ` +
         `\`rs-graph index-workspace ${workspaceConfigPath}\` first.`,
     );
   }
 
   const server = new McpServer({ name: "rs-graph-workspace", version: "0.1.0" });
-  registerWorkspaceTools(server, index);
+  registerWorkspaceTools(server, getIndex);
 
   // stdio only, by design — same rationale as the single-repo server, see docs/architecture.md.
   await server.connect(new StdioServerTransport());

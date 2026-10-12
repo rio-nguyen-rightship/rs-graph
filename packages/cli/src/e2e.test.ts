@@ -79,12 +79,19 @@ describe("end-to-end: rs-graph index + serve across every language fixture", () 
       const dbPath = path.join(DOTNET_FIXTURE, ".rs-graph", "graph.db");
 
       const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
-      // 13 real .cs files (Domain/{IGreeter,Greeter,Greeter.Diagnostics}.cs, Api/{GreetingController,
-      // Program,VesselLookupService,Clients/VesselApiClient,Messaging/{Messaging,VoyageChecklistPublisher,
-      // VoyageChecklistConsumer},Signaling/{Signaling,VoyageStatusPublisher,OnboardingHubInterceptor}}.cs)
-      // + 2 external pseudo-files.
-      expect(stats.totalFiles).toBe(15);
-      expect(stats.byLanguage.csharp).toBe(15);
+      // 16 real .cs files (Domain/{IGreeter,Greeter,Greeter.Diagnostics,AsyncGreeter}.cs, Api/
+      // {GreetingController,Program,VesselLookupService,VesselRawHttpClientLookup,
+      // AsyncGreeterConsumer,Clients/VesselApiClient,
+      // Messaging/{Messaging,VoyageChecklistPublisher,VoyageChecklistConsumer},
+      // Signaling/{Signaling,VoyageStatusPublisher,OnboardingHubInterceptor}}.cs)
+      // + 6 external pseudo-files. Fixing indexer-dotnet's reference resolution (transitive
+      // project references, a shared BCL/NuGet reference cache, and picking up the SDK's
+      // auto-generated implicit-usings file — see ProjectLoader.Load/ReferenceResolver.Resolve)
+      // let several previously-silently-unresolved framework types (ControllerBase, [Route],
+      // ActionResult<T>, DI's IServiceCollection, ...) resolve correctly, surfacing external
+      // dependency groups that were always real but never tracked before.
+      expect(stats.totalFiles).toBe(22);
+      expect(stats.byLanguage.csharp).toBe(22);
 
       const routeMap = (await callTool(dbPath, "graph_get_route_map")) as {
         routes: Array<{ route: { name: string } }>;
@@ -148,7 +155,7 @@ describe("end-to-end: rs-graph index + serve across every language fixture", () 
       expect(fs.existsSync(staleMarker)).toBe(false);
       const dbPath = path.join(rsGraphDir, "graph.db");
       const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number };
-      expect(stats.totalFiles).toBe(15);
+      expect(stats.totalFiles).toBe(22);
     },
     30_000,
   );
@@ -160,9 +167,12 @@ describe("end-to-end: rs-graph index + serve across every language fixture", () 
       const dbPath = path.join(ANGULAR_FIXTURE, ".rs-graph", "graph.db");
 
       const stats = (await callTool(dbPath, "graph_stats")) as { totalFiles: number; byLanguage: Record<string, number> };
-      // +1 for src/signal.service.ts (SignalR PUBLISHES/CONSUMES extraction fixture).
-      expect(stats.totalFiles).toBe(5);
-      expect(stats.byLanguage.typescript).toBe(5);
+      // +1 for src/signal.service.ts (SignalR PUBLISHES/CONSUMES extraction fixture), +1 for
+      // src/vessel-lookup.service.ts (HttpClientEnrichment's INVOKES_ROUTE extraction fixture),
+      // +1 external pseudo-file for @angular/common (VesselLookupService both injects and calls
+      // a method on HttpClient).
+      expect(stats.totalFiles).toBe(7);
+      expect(stats.byLanguage.typescript).toBe(7);
 
       const componentTree = (await callTool(dbPath, "graph_get_component_tree")) as {
         components: Array<{ component: { name: string } }>;

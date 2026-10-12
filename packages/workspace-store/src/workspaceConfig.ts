@@ -50,3 +50,23 @@ export function loadWorkspaceConfig(workspaceConfigPath: string): WorkspaceConfi
 export function repoDbPath(repo: WorkspaceRepoConfig): string {
   return path.join(repo.path, ".rs-graph", "graph.db");
 }
+
+/**
+ * A workspace.json repo path should always already exist — `openGraphDb` happily
+ * `mkdir -p`s whatever parent directory `.rs-graph/graph.db` needs, with no regard for whether
+ * that directory existed a moment ago. A relative path that resolved against the wrong base
+ * directory (real-world regression: a workspace.json meant to point at sibling repos under
+ * `C:\Works\SourceCode` instead resolved several of its entries to non-existent subpaths of an
+ * unrelated repo, psc-riskiq-app) doesn't fail loudly — it silently fabricates a brand-new, empty
+ * directory out of thin air just to hold a nearly-empty `.rs-graph/graph.db`, leaving debris
+ * behind in whatever unrelated project happened to be at that path. Checking existence first
+ * catches the mistake before any of that happens, without rejecting real, legitimate targets —
+ * a monorepo's own sub-project, or a test fixture — that simply lack their own `.git`.
+ */
+export function isExistingDirectory(repoPath: string): boolean {
+  try {
+    return fs.statSync(repoPath).isDirectory();
+  } catch {
+    return false;
+  }
+}

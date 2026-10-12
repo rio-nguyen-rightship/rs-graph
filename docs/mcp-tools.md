@@ -181,7 +181,14 @@ serves a *separate* MCP server exposing tools that join across all of them:
 ```
 
 `sln`/`tsconfig` are optional per-repo overrides, same meaning as `rs-graph index`'s `--sln`/
-`--tsconfig` flags.
+`--tsconfig` flags. Each `path` is resolved relative to `workspace.json`'s own folder, not to
+wherever you happen to run the command from — get one wrong (e.g. an extra `../`) and it can
+resolve to a path that was never a real repo at all. `index-workspace`/`watch-workspace` check
+that a repo's path already exists as a directory before doing anything else, and skip it
+(reported as failed, not silently touched) rather than let `openGraphDb`'s own `mkdir -p`
+fabricate a brand-new, empty directory just to hold a nearly-empty `.rs-graph/graph.db` — that's
+exactly how a wrong path leaves stray debris behind in some unrelated project instead of failing
+loudly.
 
 `index-workspace` registers both servers automatically, in each successfully-indexed repo's own
 `.mcp.json` — the single-repo `"rs-graph"` entry (same as plain `rs-graph index`) and a
@@ -218,7 +225,7 @@ touches more than one repo at once) gets full tool coverage too, without a manua
 
 | Tool | Purpose |
 | --- | --- |
-| `graph_workspace_route_consumers` | Given a Route symbol id from this repo's own `graph_get_route_map`, finds every other repo calling it through a generated SDK client (NSwag `[RouteUrl]`). |
+| `graph_workspace_route_consumers` | Given a Route symbol id from this repo's own `graph_get_route_map`, finds every other repo calling it — a generated SDK client (NSwag `[RouteUrl]`), a raw C# `HttpClient` call, or an Angular `HttpClient` call. |
 | `graph_workspace_message_consumers` | Given a MessageContract symbol id from this repo's own graph, finds every other repo (any language) that publishes/consumes the same Service Bus message type. |
 | `graph_workspace_signal_consumers` | Same, for a HubEvent symbol id — SignalR broadcasts and client `.on`/`.subscribe`/`.invoke` dispatch names. |
 | `graph_workspace_status` | Lists configured repos that were skipped (not yet indexed) — check this first if a workspace tool returns fewer results than expected. |
@@ -227,6 +234,15 @@ All three lookup tools return `{ key, owners, references }`: `owners` are the re
 symbol backing that route/message/event (for a Route, normally just the one that declares it);
 `references` are every other repo's edge pointing at it, tagged with which repo and edge type
 (`INVOKES_ROUTE`/`PUBLISHES`/`CONSUMES`).
+
+**Routes match by path shape, not by parameter name.** `api/v1/vessel/{id}` and
+`api/v1/vessel/{vesselId}` normalize to the same key — a hand-written `HttpClient`/Angular
+`HttpClient` call's local variable name (`vesselId`) has no reason to match the route's own
+declared parameter name (`id`) the way an NSwag-generated `[RouteUrl]` does (it mirrors the
+producer's exact OpenAPI parameter name). Not detected: `HttpClient.SendAsync` (its verb comes
+from an `HttpRequestMessage` argument, not the method name) and a URL built from string
+concatenation or a variable computed elsewhere — both are skipped rather than guessed at, same as
+everywhere else in this codebase that degrades gracefully instead of risking a wrong edge.
 
 ### Suggested CLAUDE.md snippet: cross-repo awareness
 
@@ -254,30 +270,98 @@ they cannot tell you a route has zero *cross-repo* callers, only zero callers *t
    truly no cross-repo caller — an empty result can also mean that repo hasn't been indexed yet.
 ```
 
-## Keeping the graph fresh on `git pull`
+**If there's no live workspace server at all** — the common case for a PR review running in CI,
+where only this one repo is checked out — none of the above works, since `graph_workspace_*`
+needs every repo's `.rs-graph/graph.db` to be reachable. Check `CROSS_REPO_MANIFEST.md` (committed
+at this repo's root) instead — see "PR-review manifest" below.
 
-Nothing re-indexes automatically just because new commits land — without this, the graph silently
-drifts from the working tree until someone remembers to run `rs-graph index` again.
-`rs-graph install-hook [path]` installs a `post-merge` git hook that re-indexes the repo after
-every `git pull`/merge (`rs-graph install-hook-workspace <workspace.json>` does the same for
-every repo in a workspace at once). It's a separate, explicit command — installing it changes
-what happens on every future pull in that repo, so it's not bundled into `index`'s automatic
-`.mcp.json` registration the way the MCP server entries are.
+## PR-review manifest
 
-`install-hook` copies [templates/post-merge.sample](../templates/post-merge.sample) to
-`.githooks/post-merge` and points `core.hooksPath` at `.githooks` (left alone if it's already set
-to something else). Commit `.githooks/post-merge` so the rest of the team gets it too — on
-Windows, also run `git update-index --chmod=+x .githooks/post-merge` after staging it, since NTFS
-doesn't track the executable bit the way git expects.
+A GitHub Actions job reviewing a PR in one repo only has *that* repo checked out. It can't run
+`rs-graph serve-workspace` (every sibling repo's `.rs-graph/graph.db` would need to exist right
+there too) and can't spin up a live multi-repo MCP session. So instead of trying to give CI live
+access to the graph, `rs-graph generate-manifest <workspace.json>` pre-computes each repo's
+cross-repo integration surface from a machine that *does* have the full workspace, and writes it
+to two files **committed into that repo itself**:
 
-**Why this needs to run in the background, not block the pull.** None of the three indexers are
-incremental at the parse/compile level — every `rs-graph index` run does a full Roslyn
-compilation of the whole .NET solution, builds a fresh TypeScript `ts.Program` over every file,
-and walks every Python file, regardless of how few files actually changed. (Only the *database
-write* is incremental: `ingest.ts` hashes each file's content and skips rewriting a file's
-symbols/edges/FTS rows if the hash hasn't changed — see `watch.ts`'s docstring for the same
+- `CROSS_REPO_MANIFEST.md` — routes this repo defines (and who calls them from elsewhere), routes
+  it calls into other repos (and who defines them), and messages/SignalR events it publishes or
+  consumes (and the counterpart repo on the other side).
+- `CROSS_REPO_MANIFEST.json` — the same data, structured, for a non-Claude script to parse.
+
+These live at the repo's **root**, not inside `.rs-graph/` — that folder is always gitignored,
+local-cache-only (per `rs-graph init`'s own printed reminder); the manifest is the opposite,
+meant to be committed like any other doc so it travels into a single-repo CI checkout.
+
+`rs-graph index-workspace <workspace.json>` regenerates every indexed repo's manifest
+automatically as its last step, so it stays in sync with every full workspace reindex without any
+separate hook wiring (a single repo's own `post-merge`/`post-checkout`/`post-rewrite` hook has no
+way to know about `workspace.json`'s other repos, so it can't do this on its own — `index-workspace`
+is the one command that already has the whole workspace in hand). Run
+`rs-graph generate-manifest <workspace.json>` directly if you want to refresh manifests without a
+full reindex.
+
+**Making a reviewer actually use it:** add a line to the repo's `CLAUDE.md` (next to the cross-repo
+awareness snippet above) telling a reviewer to check `CROSS_REPO_MANIFEST.md` before approving a
+PR that touches a route, message, or event handler — since `/code-review`, an interactive session,
+and a `claude -p "review this PR"` CI step all already read a repo's `CLAUDE.md`, that's the entire
+integration surface needed; no custom review-pipeline code required. A non-Claude bot can parse
+`CROSS_REPO_MANIFEST.json` the same way instead.
+
+Not built yet: a CI step that diffs the manifest between a PR's base and head to auto-flag a
+removed/changed cross-repo dependency. The committed file is the foundational piece — that diffing
+step is a separate, environment-specific GitHub Actions workflow, worth adding once this is in use.
+
+## Keeping the graph fresh across `git pull`, branch switches, and rebases
+
+Nothing re-indexes automatically just because the working tree changed underneath you — without
+this, the graph silently drifts until someone remembers to run `rs-graph index` again.
+`rs-graph install-hook [path]` installs three git hooks that each trigger the same background
+reindex: `post-merge` (`git pull`/merge), `post-checkout` (switching branches — not a single-file
+`git checkout -- path`, which doesn't change the whole repo), and `post-rewrite` (`git rebase`,
+`git commit --amend`). `rs-graph install-hook-workspace <workspace.json>` installs all three into
+every repo in a workspace at once. It's a separate, explicit command — installing it changes what
+happens on every future pull/checkout/rebase in that repo, so it's not bundled into `index`'s
+automatic `.mcp.json` registration the way the MCP server entries are.
+
+Two git operations change the working tree with no hook at all: `git reset --hard` and
+`git stash pop`/`apply`. `watch` (below) is the only thing that catches those live; otherwise the
+graph just needs a manual `rs-graph index` afterwards.
+
+`install-hook` copies [templates/post-merge.sample](../templates/post-merge.sample),
+[templates/post-checkout.sample](../templates/post-checkout.sample), and
+[templates/post-rewrite.sample](../templates/post-rewrite.sample) to `.githooks/`, and points
+`core.hooksPath` at `.githooks` (left alone if it's already set to something else). Commit
+`.githooks/` so the rest of the team gets it too — on Windows, also run
+`git update-index --chmod=+x .githooks/post-merge .githooks/post-checkout .githooks/post-rewrite`
+after staging them, since NTFS doesn't track the executable bit the way git expects.
+
+**Why these need to run in the background, not block the git command.** None of the three
+indexers are incremental at the parse/compile level — every `rs-graph index` run does a full
+Roslyn compilation of the whole .NET solution, builds a fresh TypeScript `ts.Program` over every
+file, and walks every Python file, regardless of how few files actually changed. (Only the
+*database write* is incremental: `ingest.ts` hashes each file's content and skips rewriting a
+file's symbols/edges/FTS rows if the hash hasn't changed — see `watch.ts`'s docstring for the same
 tradeoff in the `watch` command.) On a large repo, that full re-scan can take far longer than is
-reasonable to block a `git pull` on. So the hook launches `rs-graph index` detached and exits 0
-immediately, without waiting to find out whether the reindex even succeeds — a slow or failing
-reindex must never look like a failed pull. Output goes to `.rs-graph/post-merge.log`; check there
-if the graph seems to be lagging behind the working tree.
+reasonable to block a pull/checkout/rebase on. So each hook launches `rs-graph index` detached and
+exits 0 immediately, without waiting to find out whether the reindex even succeeds — a slow or
+failing reindex must never look like a failed git command. Output goes to `.rs-graph/hooks.log`;
+check there if the graph seems to be lagging behind the working tree.
+
+### Watching for local changes
+
+`rs-graph watch [path]` re-indexes a repo whenever a relevant file (`.cs`/`.ts`/`.tsx`/`.html`/
+`.py`, outside `node_modules`/`bin`/`obj`/`dist`/`.git`/`.rs-graph`/any dotfolder) is added,
+edited, or deleted, debouncing a burst of changes into one reindex. All three kinds of change are
+handled: an edit or a new file changes what gets written on the next reindex as usual, and a
+*deleted* file has its symbols/edges/FTS rows purged too (`ingest.ts` compares each language's
+full file list against what's already in the database — anything missing was removed from disk).
+`rs-graph watch-workspace <workspace.json>` does the same for every repo in a workspace at once,
+one independent watcher per repo, so one repo's failure doesn't stop the others.
+
+`watch` and the git hooks above are meant to run at the same time — someone `git pull`ing,
+switching branches, or rebasing while `watch` is already running in another terminal is a normal,
+expected scenario, not a misconfiguration. Both ultimately call the same full-rescan reindex
+against the same `.rs-graph/graph.db`, and SQLite only allows one writer at a time even in WAL
+mode — `graph-store` sets a `busy_timeout` so whichever one loses that race just waits (well under
+the ~1-2s a single repo's reindex takes) instead of throwing `SQLITE_BUSY`.

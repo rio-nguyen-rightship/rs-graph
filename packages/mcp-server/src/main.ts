@@ -8,7 +8,7 @@ async function main(): Promise<void> {
   const targetPath = path.resolve(process.argv[2] ?? ".");
   const dbPath = path.join(targetPath, ".rs-graph", "graph.db");
 
-  const db = openGraphDb({ dbPath });
+  const db = openGraphDb({ dbPath, mustExist: true });
   const server = createServer(db);
 
   // stdio only, by design — see docs/architecture.md's security note. No network listener,

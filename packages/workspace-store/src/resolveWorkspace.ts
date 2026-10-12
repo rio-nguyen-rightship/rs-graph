@@ -111,6 +111,44 @@ export function buildCrossRepoIndex(repos: WorkspaceRepoConfig[]): CrossRepoInde
   return { ownersByKey, referencesByKey, skippedRepos };
 }
 
+function currentDbMtimes(repos: WorkspaceRepoConfig[]): Map<string, number> {
+  const mtimes = new Map<string, number>();
+  for (const repo of repos) {
+    const dbPath = repoDbPath(repo);
+    mtimes.set(repo.name, fs.existsSync(dbPath) ? fs.statSync(dbPath).mtimeMs : -1);
+  }
+  return mtimes;
+}
+
+function mtimesEqual(a: Map<string, number>, b: Map<string, number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [name, mtime] of a) {
+    if (b.get(name) !== mtime) return false;
+  }
+  return true;
+}
+
+/**
+ * Wraps buildCrossRepoIndex with lazy, per-call freshness checking, so a long-lived
+ * `serve-workspace` process doesn't need a restart to see a repo re-indexed by `watch-workspace`
+ * or a git hook while it's running. Cheap when nothing changed (one `statSync` per repo); only
+ * pays for a full rebuild when some repo's graph.db mtime actually moved (including a repo that
+ * just got indexed for the first time, via the -1 sentinel for "no db yet").
+ */
+export function createLiveCrossRepoIndex(repos: WorkspaceRepoConfig[]): () => CrossRepoIndex {
+  let index = buildCrossRepoIndex(repos);
+  let lastMtimes = currentDbMtimes(repos);
+
+  return () => {
+    const nowMtimes = currentDbMtimes(repos);
+    if (!mtimesEqual(lastMtimes, nowMtimes)) {
+      index = buildCrossRepoIndex(repos);
+      lastMtimes = nowMtimes;
+    }
+    return index;
+  };
+}
+
 export interface CrossRepoLookupResult {
   key: string;
   owners: CrossRepoOwner[];

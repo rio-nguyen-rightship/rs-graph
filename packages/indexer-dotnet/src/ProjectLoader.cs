@@ -8,6 +8,13 @@ public sealed class LoadedProject
     public required string AssemblyName { get; init; }
     public required string TargetFramework { get; init; }
     public required List<string> CompileItems { get; init; }
+    /// <summary>The SDK's auto-generated implicit-usings file, if a prior real build already
+    /// produced it — see ProjectLoader.Load's own comment. Fed to the compiler alongside
+    /// CompileItems (so its `global using` directives take effect for name resolution across the
+    /// whole compilation), but deliberately kept separate from CompileItems/the "owned" file set:
+    /// it's compiler plumbing, not source the user wrote, and giving it a File/Symbol row at its
+    /// odd obj/ path would only be graph noise.</summary>
+    public string? ImplicitUsingsFile { get; init; }
     public required List<string> ProjectReferences { get; init; }
     /// <summary>Absolute path to the bin output directory, used only to resolve a sibling
     /// project's already-built DLL as a last resort (see ReferenceResolver) — never built by us.</summary>
@@ -59,11 +66,26 @@ public static class ProjectLoader
             }
         }
 
+        var intermediateOutputPath = Path.GetFullPath(
+            Path.Combine(project.DirectoryPath, project.GetPropertyValue("IntermediateOutputPath")));
+
         var compileItems = project.GetItems("Compile")
             .Select(i => Path.GetFullPath(Path.Combine(project.DirectoryPath, i.EvaluatedInclude)))
             .Where(File.Exists)
             .Distinct()
             .ToList();
+
+        // <ImplicitUsings>enable</ImplicitUsings> adds this file to @(Compile) via a build
+        // target, not at plain evaluation time (obj/ is excluded from the default Compile glob,
+        // and evaluation alone — no target ever runs here, see this class's own doc comment —
+        // never sees it). If a real `dotnet build`/`restore` already generated it, read it: any
+        // file relying on an implicit `global using` (a bare `Task<T>` with no explicit
+        // `using System.Threading.Tasks;`, say) would otherwise silently fail to resolve, and
+        // every call/injection through such a type loses its edge with nothing surfaced to the
+        // user — a real repo hit this for an entire fully-async service interface. Kept out of
+        // compileItems itself (see ImplicitUsingsFile) so it never becomes an "owned" file.
+        var globalUsingsPath = Path.Combine(intermediateOutputPath, $"{Path.GetFileNameWithoutExtension(csprojPath)}.GlobalUsings.g.cs");
+        var implicitUsingsFile = File.Exists(globalUsingsPath) ? globalUsingsPath : null;
 
         var projectReferences = project.GetItems("ProjectReference")
             .Select(i => Path.GetFullPath(Path.Combine(project.DirectoryPath, i.EvaluatedInclude)))
@@ -74,8 +96,6 @@ public static class ProjectLoader
         if (string.IsNullOrEmpty(assemblyName)) assemblyName = Path.GetFileNameWithoutExtension(csprojPath);
 
         var outputPath = Path.GetFullPath(Path.Combine(project.DirectoryPath, project.GetPropertyValue("OutputPath")));
-        var intermediateOutputPath = Path.GetFullPath(
-            Path.Combine(project.DirectoryPath, project.GetPropertyValue("IntermediateOutputPath")));
 
         return new LoadedProject
         {
@@ -83,6 +103,7 @@ public static class ProjectLoader
             AssemblyName = assemblyName,
             TargetFramework = targetFramework,
             CompileItems = compileItems,
+            ImplicitUsingsFile = implicitUsingsFile,
             ProjectReferences = projectReferences,
             OutputPath = outputPath,
             IntermediateOutputPath = intermediateOutputPath,
@@ -115,5 +136,34 @@ public static class ProjectLoader
 
         foreach (var p in projects) Visit(p);
         return result;
+    }
+
+    /// <summary>Full transitive closure of a project's ProjectReferences. A real `dotnet build`
+    /// gives every project this automatically (SDK-style ProjectReference flows transitively —
+    /// referencing A which references B hands you B's public API too, no direct reference to B
+    /// needed), but this indexer builds each CSharpCompilation by hand and only ever wired up
+    /// direct references — so a type used by name two hops away (e.g. RightStore.Api using a
+    /// RightStore.Api.Models DTO that only RightStore.Services, not RightStore.Api itself,
+    /// references directly) came back as an unresolved/error type in RightStore.Api's own
+    /// compilation. That silently breaks every call whose signature involves such a type:
+    /// GetSymbolInfo returns null for the whole invocation, so no CALLS/INJECTS edge is emitted
+    /// and no error is ever surfaced — a real repo's graph_get_callers/graph_get_references can
+    /// come back empty for a method that plainly has callers in the source.</summary>
+    public static List<string> GetTransitiveProjectReferences(LoadedProject project, IReadOnlyDictionary<string, LoadedProject> byPath)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var queue = new Queue<string>(project.ProjectReferences);
+
+        while (queue.Count > 0)
+        {
+            var path = queue.Dequeue();
+            if (!seen.Add(path)) continue;
+            if (byPath.TryGetValue(path, out var referenced))
+            {
+                foreach (var transitive in referenced.ProjectReferences) queue.Enqueue(transitive);
+            }
+        }
+
+        return [.. seen];
     }
 }

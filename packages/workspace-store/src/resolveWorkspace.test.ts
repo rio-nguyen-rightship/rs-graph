@@ -3,8 +3,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { closeGraphDb, openGraphDb, type GraphDb } from "@rs-graph/graph-store";
-import { buildCrossRepoIndex, lookupCrossRepo } from "./resolveWorkspace.js";
-import { loadWorkspaceConfig, repoDbPath, type WorkspaceRepoConfig } from "./workspaceConfig.js";
+import { buildCrossRepoIndex, createLiveCrossRepoIndex, lookupCrossRepo } from "./resolveWorkspace.js";
+import { isExistingDirectory, loadWorkspaceConfig, repoDbPath, type WorkspaceRepoConfig } from "./workspaceConfig.js";
 
 let tmpRoot: string;
 
@@ -63,6 +63,73 @@ describe("loadWorkspaceConfig", () => {
   it("throws a clear error when repos is missing or not an array", () => {
     fs.writeFileSync(path.join(tmpRoot, "bad.json"), JSON.stringify({ notRepos: [] }));
     expect(() => loadWorkspaceConfig(path.join(tmpRoot, "bad.json"))).toThrow(/expected a top-level "repos" array/);
+  });
+});
+
+describe("isExistingDirectory", () => {
+  it("is true for a path that already exists as a directory", () => {
+    const repoPath = path.join(tmpRoot, "real-repo");
+    fs.mkdirSync(repoPath, { recursive: true });
+    expect(isExistingDirectory(repoPath)).toBe(true);
+  });
+
+  it("is false for a path that doesn't exist yet — the signal a workspace.json path mistake left behind", () => {
+    // Mirrors the real-world regression: a workspace.json repo path resolved against the wrong
+    // base directory, landing on a path that had never existed. openGraphDb would have silently
+    // `mkdir -p`'d it into existence just to hold a nearly-empty .rs-graph/graph.db — this check
+    // catches the mistake first.
+    expect(isExistingDirectory(path.join(tmpRoot, "never-existed"))).toBe(false);
+  });
+
+  it("is false for a path that exists but is a file, not a directory", () => {
+    const filePath = path.join(tmpRoot, "some-file.txt");
+    fs.writeFileSync(filePath, "not a repo");
+    expect(isExistingDirectory(filePath)).toBe(false);
+  });
+});
+
+describe("createLiveCrossRepoIndex", () => {
+  it("picks up a repo re-indexed after the getter was created, without needing a new call site", () => {
+    // Mirrors the real gap: a long-lived `serve-workspace` process whose repos get re-indexed by
+    // `watch-workspace` or a git hook while it's still running — the getter must reflect that on
+    // its next call, not just at the moment it was constructed.
+    const repo = makeRepo("live-repo");
+    seedDb(repo, () => {});
+    const getIndex = createLiveCrossRepoIndex([repo]);
+
+    expect(lookupCrossRepo(getIndex(), "Route", "csharp:route:GET:api/greeting").owners).toEqual([]);
+
+    // Simulates a re-index writing more rows into the same already-existing db (not re-seeding
+    // via seedDb, which would re-insert the same File row and violate its own PRIMARY KEY).
+    const db = openGraphDb({ dbPath: repoDbPath(repo) });
+    insertSymbol(db, "csharp:route:GET:api/greeting", "GET api/greeting", "Route");
+    closeGraphDb(db);
+
+    const result = lookupCrossRepo(getIndex(), "Route", "csharp:route:GET:api/greeting");
+    expect(result.owners).toEqual([
+      { repo: "live-repo", symbolId: "csharp:route:GET:api/greeting", name: "GET api/greeting", kind: "Route" },
+    ]);
+  });
+
+  it("picks up a repo indexed for the first time after the getter was created", () => {
+    const repo = makeRepo("not-yet-indexed");
+    fs.mkdirSync(repo.path, { recursive: true });
+    const getIndex = createLiveCrossRepoIndex([repo]);
+    expect(getIndex().skippedRepos).toEqual(["not-yet-indexed"]);
+
+    seedDb(repo, () => {});
+
+    expect(getIndex().skippedRepos).toEqual([]);
+  });
+
+  it("does not rebuild when nothing changed", () => {
+    const repo = makeRepo("stable-repo");
+    seedDb(repo, (db) => insertSymbol(db, "csharp:route:GET:api/stable", "GET api/stable", "Route"));
+    const getIndex = createLiveCrossRepoIndex([repo]);
+
+    const first = getIndex();
+    const second = getIndex();
+    expect(second).toBe(first); // same object identity — no rebuild happened
   });
 });
 

@@ -4,28 +4,34 @@ import { lookupCrossRepo, type CrossRepoIndex } from "@rs-graph/workspace-store"
 import { jsonResult } from "./toolResult.js";
 
 /**
- * Registers workspace-scoped tools against an already-built cross-repo index (see
- * @rs-graph/workspace-store). Each tool takes a symbol id from the CALLING repo's own single-repo
- * graph (from graph_get_route_map/graph_search_symbol) and looks up what every OTHER configured
- * repo knows about it — the thing a single-repo graph_* tool can never answer on its own.
+ * Registers workspace-scoped tools against a cross-repo index obtained via `getIndex` — call it
+ * fresh inside each handler rather than closing over a fixed index, so a live-refreshing getter
+ * (createLiveCrossRepoIndex) can serve up-to-date data without re-registering tools. Each tool
+ * takes a symbol id from the CALLING repo's own single-repo graph (from
+ * graph_get_route_map/graph_search_symbol) and looks up what every OTHER configured repo knows
+ * about it — the thing a single-repo graph_* tool can never answer on its own.
  */
-export function registerWorkspaceTools(server: McpServer, index: CrossRepoIndex): void {
+export function registerWorkspaceTools(server: McpServer, getIndex: () => CrossRepoIndex): void {
   server.registerTool(
     "graph_workspace_route_consumers",
     {
       title: "Workspace: route consumers",
       description:
         "Given a Route symbol id from THIS repo's own graph (graph_get_route_map/graph_search_symbol), " +
-        "finds every other configured repo that calls it through a generated SDK client (an NSwag " +
-        "[RouteUrl]-decorated method, matched by normalized verb-less route template — the join " +
-        "misses a producer registering the same template under more than one verb without further " +
-        "disambiguation). This is the cross-repo half of 'what would deleting this endpoint break', " +
+        "finds every other configured repo that calls it — through a generated SDK client (an NSwag " +
+        "[RouteUrl]-decorated method), a raw C# HttpClient call, or an Angular HttpClient call — " +
+        "matched by normalized, verb-less route shape (parameter names don't need to match; a call " +
+        "site's own local variable name never has any reason to match the route's declared parameter " +
+        "name). The join misses a producer registering the same template under more than one verb " +
+        "without further disambiguation, and a C# HttpClient.SendAsync/concatenated or dynamically " +
+        "built URL, since neither carries a verb/URL this indexer attempts to unpack. This is the " +
+        "cross-repo half of 'what would deleting this endpoint break', " +
         "which a single-repo graph can never answer on its own. Returns { key, owners, references }: " +
         "owners are the repo(s) that actually declare this route (usually one); references are the " +
         "INVOKES_ROUTE call sites in every consuming repo.",
       inputSchema: { symbolId: z.string().describe("A Route symbol id from this repo's own graph") },
     },
-    ({ symbolId }) => jsonResult(lookupCrossRepo(index, "Route", symbolId)),
+    ({ symbolId }) => jsonResult(lookupCrossRepo(getIndex(), "Route", symbolId)),
   );
 
   server.registerTool(
@@ -42,7 +48,7 @@ export function registerWorkspaceTools(server: McpServer, index: CrossRepoIndex)
         "edge with its direction (edgeType: PUBLISHES or CONSUMES).",
       inputSchema: { symbolId: z.string().describe("A MessageContract symbol id from this repo's own graph") },
     },
-    ({ symbolId }) => jsonResult(lookupCrossRepo(index, "MessageContract", symbolId)),
+    ({ symbolId }) => jsonResult(lookupCrossRepo(getIndex(), "MessageContract", symbolId)),
   );
 
   server.registerTool(
@@ -57,7 +63,7 @@ export function registerWorkspaceTools(server: McpServer, index: CrossRepoIndex)
         "as graph_workspace_message_consumers.",
       inputSchema: { symbolId: z.string().describe("A HubEvent symbol id from this repo's own graph") },
     },
-    ({ symbolId }) => jsonResult(lookupCrossRepo(index, "HubEvent", symbolId)),
+    ({ symbolId }) => jsonResult(lookupCrossRepo(getIndex(), "HubEvent", symbolId)),
   );
 
   server.registerTool(
@@ -71,6 +77,6 @@ export function registerWorkspaceTools(server: McpServer, index: CrossRepoIndex)
         "a genuine absence of any cross-repo caller.",
       inputSchema: {},
     },
-    () => jsonResult({ skippedRepos: index.skippedRepos }),
+    () => jsonResult({ skippedRepos: getIndex().skippedRepos }),
   );
 }

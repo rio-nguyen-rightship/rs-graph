@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -15,6 +16,7 @@ public sealed class SymbolGraphBuilder(string repoRoot, NdjsonWriter writer, Ext
 {
     private static readonly string[] HttpVerbAttributes = ["HttpGet", "HttpPost", "HttpPut", "HttpDelete", "HttpPatch"];
     private static readonly string[] DiRegistrationMethods = ["AddScoped", "AddSingleton", "AddTransient"];
+    private static readonly string[] HttpClientVerbMethods = ["GetAsync", "PostAsync", "PutAsync", "DeleteAsync", "PatchAsync"];
 
     private readonly HashSet<string> _emittedFiles = new(StringComparer.OrdinalIgnoreCase);
 
@@ -302,7 +304,8 @@ public sealed class SymbolGraphBuilder(string repoRoot, NdjsonWriter writer, Ext
                 Col = lineSpan.StartLinePosition.Character + 1,
             });
 
-            if (GetRouteUrlTemplate(targetSymbol) is { } routeUrlTemplate)
+            var routeUrlTemplate = GetRouteUrlTemplate(targetSymbol) ?? GetHttpClientCallTemplate(targetSymbol, invocation);
+            if (routeUrlTemplate is not null)
             {
                 writer.Write(new EdgeRecord
                 {
@@ -313,6 +316,43 @@ public sealed class SymbolGraphBuilder(string repoRoot, NdjsonWriter writer, Ext
                     Col = lineSpan.StartLinePosition.Character + 1,
                 });
             }
+        }
+    }
+
+    /// <summary>Detects a raw HttpClient call — no generated NSwag client, so no [RouteUrl]
+    /// attribute to read — and extracts its URL argument, when it's simple enough to normalize
+    /// reliably. SendAsync is deliberately not covered: its verb comes from an HttpRequestMessage
+    /// argument, not the method name, which this indexer doesn't attempt to unpack.</summary>
+    private static string? GetHttpClientCallTemplate(IMethodSymbol targetSymbol, InvocationExpressionSyntax invocation)
+    {
+        if (targetSymbol.ContainingType?.ToDisplayString() != "System.Net.Http.HttpClient") return null;
+        if (Array.IndexOf(HttpClientVerbMethods, targetSymbol.Name) < 0) return null;
+
+        var urlArgument = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
+        return ExtractUrlTemplate(urlArgument);
+    }
+
+    /// <summary>Pulls a URL template out of a call argument: a plain string literal is used
+    /// as-is; an interpolated string ($"...") has each {expr} slot collapsed to the same {}
+    /// placeholder RouteUtils.NormalizeTemplate uses, since the caller's own local variable name
+    /// (e.g. {vesselId}) has no reason to match the route's declared parameter name (e.g. {id}).
+    /// Anything else — concatenation, a pre-built variable — is skipped rather than guessed at.</summary>
+    private static string? ExtractUrlTemplate(ExpressionSyntax? expression)
+    {
+        switch (expression)
+        {
+            case LiteralExpressionSyntax lit when lit.IsKind(SyntaxKind.StringLiteralExpression):
+                return lit.Token.ValueText;
+            case InterpolatedStringExpressionSyntax interpolated:
+                var sb = new StringBuilder();
+                foreach (var content in interpolated.Contents)
+                {
+                    if (content is InterpolatedStringTextSyntax text) sb.Append(text.TextToken.ValueText);
+                    else if (content is InterpolationSyntax) sb.Append("{}");
+                }
+                return sb.ToString();
+            default:
+                return null;
         }
     }
 

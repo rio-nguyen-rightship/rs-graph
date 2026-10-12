@@ -1,8 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { closeGraphDb, openGraphDb } from "@rs-graph/graph-store";
+import { isExistingDirectory } from "@rs-graph/workspace-store";
 
 export function runInit(targetPath: string): void {
+  if (!isExistingDirectory(targetPath)) {
+    console.error(`${targetPath} is not an existing directory — nothing to initialize.`);
+    process.exitCode = 1;
+    return;
+  }
   const rsGraphDir = path.join(targetPath, ".rs-graph");
   fs.mkdirSync(rsGraphDir, { recursive: true });
 

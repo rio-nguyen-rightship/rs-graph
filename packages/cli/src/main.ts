@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import * as path from "node:path";
+import { runGenerateManifest } from "./commands/generateManifest.js";
 import { runInit } from "./commands/init.js";
 import { runIndex } from "./commands/indexRepo.js";
 import { runIndexWorkspace } from "./commands/indexWorkspace.js";
 import { installHook, installHookWorkspace } from "./commands/installHook.js";
 import { runServe } from "./commands/serve.js";
 import { runServeWorkspace } from "./commands/serveWorkspace.js";
-import { runWatch } from "./commands/watch.js";
+import { runWatch, runWatchWorkspace } from "./commands/watch.js";
 
 const program = new Command();
 
@@ -41,6 +42,15 @@ program
   .action((workspaceConfig: string, opts: { fresh?: boolean }) =>
     runIndexWorkspace(path.resolve(workspaceConfig), { fresh: opts.fresh }),
   );
+
+program
+  .command("generate-manifest")
+  .description(
+    "Write CROSS_REPO_MANIFEST.md/.json into every indexed repo in a workspace.json, summarizing " +
+      "its cross-repo integration surface for a repo-scoped PR reviewer (see docs/mcp-tools.md)",
+  )
+  .argument("<workspaceConfig>", "path to a workspace.json file")
+  .action((workspaceConfig: string) => runGenerateManifest(path.resolve(workspaceConfig)));
 
 program
   .command("serve")
@@ -77,6 +87,15 @@ program
   .option("--fresh", "delete any existing .rs-graph/graph.db first (recovers from a stale/corrupted database)")
   .action((targetPath: string, opts: { sln?: string; tsconfig?: string; fresh?: boolean }) =>
     runWatch(path.resolve(targetPath), { slnPath: opts.sln, tsconfigPath: opts.tsconfig, fresh: opts.fresh }),
+  );
+
+program
+  .command("watch-workspace")
+  .description("Watch every repo listed in a workspace.json for changes and incrementally re-index each")
+  .argument("<workspaceConfig>", "path to a workspace.json file")
+  .option("--fresh", "delete any existing .rs-graph/graph.db first, for every repo in the workspace")
+  .action((workspaceConfig: string, opts: { fresh?: boolean }) =>
+    runWatchWorkspace(path.resolve(workspaceConfig), { fresh: opts.fresh }),
   );
 
 program.parseAsync(process.argv);

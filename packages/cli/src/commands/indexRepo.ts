@@ -11,6 +11,7 @@ import {
   AngularEnricher,
   ArraySink,
   AureliaEnricher,
+  HttpClientEnrichment,
   TsGraphBuilder,
   findTsConfig,
   loadProgram,
@@ -114,6 +115,7 @@ function runTypeScriptIndexer(tsconfigPath: string, repoRoot: string): GraphReco
   new TsGraphBuilder(repoRoot, sink, externalSymbols, checker, ownedFiles, compilerOptions).process(program);
   new AngularEnricher(repoRoot, sink, checker, ownedFiles).process(program);
   new AureliaEnricher(repoRoot, sink, checker, ownedFiles).process(program);
+  new HttpClientEnrichment(repoRoot, sink, checker, ownedFiles).process(program);
   for (const record of externalSymbols.flush()) sink.write(record);
 
   return sink.records;

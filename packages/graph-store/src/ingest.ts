@@ -12,6 +12,7 @@ import {
 export interface IngestResult {
   filesChanged: number;
   filesUnchanged: number;
+  filesDeleted: number;
   symbolsWritten: number;
   edgesWritten: number;
 }
@@ -28,7 +29,8 @@ function edgeCol(edge: GraphEdgeRecord): number | null {
  * Ingests one full batch of NDJSON records from a single indexer run (see core-schema's
  * GraphRecord union). Idempotent: a file whose contentHash matches what's already stored is
  * left untouched — its symbols/edges are not rewritten. A new/changed file has its
- * previously-stored symbols/components/edges replaced with the fresh batch.
+ * previously-stored symbols/components/edges replaced with the fresh batch. A file previously
+ * indexed but absent from this run (deleted from disk) has its rows purged entirely.
  *
  * Cross-file edges are only (re)written when the edge's *source* file is being (re)processed —
  * the target side doesn't need to already exist (unresolved/external targets are expected,
@@ -90,10 +92,25 @@ export function ingestGraphRecords(db: GraphDb, records: Iterable<GraphRecord>):
     }
   }
 
+  // A file deleted from disk never appears in a fresh indexer run's output at all, so it can't be
+  // caught by the contentHash comparison above. Each indexer rescans its whole target on every
+  // run, so any File row of a language this batch touched that isn't in filePathSet no longer
+  // exists and its rows are stale. Scoped by language so a batch from one indexer (e.g. csharp)
+  // never mistakes another language's untouched files for deletions.
+  const languagesInBatch = new Set(files.map((f) => f.language));
+  const filesByLanguageStmt = db.prepare("SELECT path FROM File WHERE language = ?");
+  const deletedFiles = new Set<string>();
+  for (const language of languagesInBatch) {
+    for (const row of filesByLanguageStmt.all(language) as { path: string }[]) {
+      if (!filePathSet.has(row.path)) deletedFiles.add(row.path);
+    }
+  }
+
   const symbolIdsByFileStmt = db.prepare("SELECT id FROM Symbol WHERE filePath = ?");
   const deleteEdgesFromStmt = db.prepare("DELETE FROM Edge WHERE fromId = ?");
   const deleteFtsStmt = db.prepare("DELETE FROM SymbolFts WHERE id = ?");
   const deleteSymbolStmt = db.prepare("DELETE FROM Symbol WHERE id = ?");
+  const deleteFileStmt = db.prepare("DELETE FROM File WHERE path = ?");
 
   const upsertFileStmt = db.prepare(
     `INSERT INTO File (path, language, contentHash, sizeBytes) VALUES (@path, @language, @contentHash, @sizeBytes)
@@ -133,8 +150,8 @@ export function ingestGraphRecords(db: GraphDb, records: Iterable<GraphRecord>):
   let edgesWritten = 0;
 
   const run = db.transaction(() => {
-    // 1. Clear out stale rows for changed/new files.
-    for (const filePath of changedFiles) {
+    // 1. Clear out stale rows for changed/new files, and for files removed from disk entirely.
+    for (const filePath of new Set([...changedFiles, ...deletedFiles])) {
       const staleSymbolIds = (symbolIdsByFileStmt.all(filePath) as { id: string }[]).map((r) => r.id);
       for (const id of staleSymbolIds) {
         deleteEdgesFromStmt.run(id);
@@ -142,6 +159,9 @@ export function ingestGraphRecords(db: GraphDb, records: Iterable<GraphRecord>):
         deleteSymbolStmt.run(id);
       }
       deleteEdgesFromStmt.run(filePath); // DEFINES/IMPORTS sourced directly from the file
+    }
+    for (const filePath of deletedFiles) {
+      deleteFileStmt.run(filePath);
     }
 
     // 2. Upsert File rows (all of them, including unchanged — cheap, keeps metadata current).
@@ -212,6 +232,7 @@ export function ingestGraphRecords(db: GraphDb, records: Iterable<GraphRecord>):
   return {
     filesChanged: changedFiles.size,
     filesUnchanged,
+    filesDeleted: deletedFiles.size,
     symbolsWritten,
     edgesWritten,
   };
