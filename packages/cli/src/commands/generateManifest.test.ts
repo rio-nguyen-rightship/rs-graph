@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { closeGraphDb, openGraphDb, type GraphDb } from "@rs-graph/graph-store";
 import { repoDbPath, type WorkspaceRepoConfig } from "@rs-graph/workspace-store";
-import { runGenerateManifest } from "./generateManifest.js";
+import { generateManifests, runGenerateManifest } from "./generateManifest.js";
 
 let workspaceDir: string;
 
@@ -73,5 +73,51 @@ describe("runGenerateManifest", () => {
 
     expect(() => runGenerateManifest(workspaceConfigPath)).not.toThrow();
     expect(fs.existsSync(path.join(repo.path, "CROSS_REPO_MANIFEST.md"))).toBe(false);
+  });
+});
+
+describe("generateManifests idempotency", () => {
+  function setupProducer(): { repo: WorkspaceRepoConfig; workspaceConfigPath: string } {
+    const repo = makeRepo("producer");
+    seedDb(repo, (db) => insertSymbol(db, "csharp:route:GET:api/greeting", "GET api/greeting", "Route"));
+    const workspaceConfigPath = path.join(workspaceDir, "workspace.json");
+    fs.writeFileSync(workspaceConfigPath, JSON.stringify({ repos: [{ name: "producer", path: "./producer" }] }));
+    return { repo, workspaceConfigPath };
+  }
+
+  it("leaves files byte-for-byte untouched when nothing but the timestamp would change", () => {
+    const { repo, workspaceConfigPath } = setupProducer();
+    const jsonPath = path.join(repo.path, "CROSS_REPO_MANIFEST.json");
+
+    expect(generateManifests(workspaceConfigPath).written).toEqual(["producer"]);
+    const before = fs.readFileSync(jsonPath, "utf8");
+    const mtimeBefore = fs.statSync(jsonPath).mtimeMs;
+
+    const second = generateManifests(workspaceConfigPath);
+
+    expect(second).toEqual({ written: [], unchanged: ["producer"], skipped: [] });
+    expect(fs.readFileSync(jsonPath, "utf8")).toBe(before);
+    expect(fs.statSync(jsonPath).mtimeMs).toBe(mtimeBefore);
+  });
+
+  it("rewrites when the integration surface actually changed", () => {
+    const { repo, workspaceConfigPath } = setupProducer();
+    generateManifests(workspaceConfigPath);
+
+    const db = openGraphDb({ dbPath: repoDbPath(repo) });
+    insertSymbol(db, "csharp:route:POST:api/farewell", "POST api/farewell", "Route");
+    closeGraphDb(db);
+
+    expect(generateManifests(workspaceConfigPath).written).toEqual(["producer"]);
+    expect(fs.readFileSync(path.join(repo.path, "CROSS_REPO_MANIFEST.md"), "utf8")).toContain("POST api/farewell");
+  });
+
+  it("rewrites a manifest whose .md was deleted, even if the .json still matches", () => {
+    const { repo, workspaceConfigPath } = setupProducer();
+    generateManifests(workspaceConfigPath);
+    fs.rmSync(path.join(repo.path, "CROSS_REPO_MANIFEST.md"));
+
+    expect(generateManifests(workspaceConfigPath).written).toEqual(["producer"]);
+    expect(fs.existsSync(path.join(repo.path, "CROSS_REPO_MANIFEST.md"))).toBe(true);
   });
 });

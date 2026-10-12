@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import chokidar from "chokidar";
 import { isExistingDirectory, loadWorkspaceConfig } from "@rs-graph/workspace-store";
+import { generateManifests, type ManifestRunResult } from "./generateManifest.js";
 import { runIndex, runIndexForWorkspace, type RunIndexOptions } from "./indexRepo.js";
 
 const RELEVANT_EXTENSIONS = [".cs", ".ts", ".tsx", ".html", ".py"];
@@ -100,6 +101,30 @@ export function runWatch(targetPath: string, options: RunIndexOptions = {}): voi
   watchRepo(targetPath, options, undefined, (opts) => runIndex(targetPath, opts));
 }
 
+const MANIFEST_DEBOUNCE_MS = 2000;
+
+/**
+ * Keeps every repo's committed CROSS_REPO_MANIFEST.md/.json in step with the graphs `watch-workspace`
+ * keeps fresh — without this they only moved on a full `index-workspace`, and silently drifted
+ * between runs. Debounced and serialized like a reindex (a burst of repos finishing together costs
+ * one regeneration), and idempotent: generateManifests only rewrites a file whose content really
+ * changed, so no spurious git diffs.
+ */
+export function createManifestRefresher(
+  workspaceConfigPath: string,
+  generate: (configPath: string) => ManifestRunResult = generateManifests,
+  debounceMs = MANIFEST_DEBOUNCE_MS,
+): DebouncedReindexer {
+  return new DebouncedReindexer(async () => {
+    try {
+      const result = generate(workspaceConfigPath);
+      if (result.written.length > 0) console.log(`[manifest] updated: ${result.written.join(", ")}`);
+    } catch (err) {
+      console.error("[manifest] regeneration failed:", err);
+    }
+  }, debounceMs);
+}
+
 export interface RunWatchWorkspaceOptions {
   fresh?: boolean;
 }
@@ -116,6 +141,9 @@ export function runWatchWorkspace(workspaceConfigPath: string, options: RunWatch
     return;
   }
 
+  const manifestRefresher = createManifestRefresher(workspaceConfigPath);
+  manifestRefresher.notifyChange(); // bring manifests in line with the graphs as they are right now
+
   for (const repo of config.repos) {
     if (!isExistingDirectory(repo.path)) {
       console.log(
@@ -131,6 +159,7 @@ export function runWatchWorkspace(workspaceConfigPath: string, options: RunWatch
       async (opts) => {
         const outcome = await runIndexForWorkspace(repo.path, opts);
         if (outcome.status === "failed") console.error(`[${repo.name}] re-index failed: ${outcome.error}`);
+        else if (outcome.status === "ok") manifestRefresher.notifyChange();
       },
     );
   }

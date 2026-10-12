@@ -8,8 +8,12 @@ Makes Claude Code use the rs-graph code graph without any per-repo setup:
   It never runs restore/build: for a .NET repo that was never restored it only says so.
 - **MCP server** ([.mcp.json](.mcp.json)) — `rs-graph serve .`. The server starts even before the graph
   exists and answers "not indexed yet" until it does, so a first-time index doesn't need a restart.
-- **Skill** ([skills/rs-graph](skills/rs-graph/SKILL.md)) — when to use which `graph_*` tool, how to read
-  the graph's status, when Grep is still the right call, and the cross-repo checks.
+- **Skill `rs-graph`** ([skills/rs-graph](skills/rs-graph/SKILL.md)) — when to use which `graph_*` tool, how
+  to read the graph's status, when Grep is still the right call, and the cross-repo checks.
+- **Skill `rs-graph-cross-repo-review`** ([skills/rs-graph-cross-repo-review](skills/rs-graph-cross-repo-review/SKILL.md))
+  — checklist for reviewing a change to a route, message contract, or SignalR event: look up the other side
+  via the workspace tools or, with only one repo checked out, the committed `CROSS_REPO_MANIFEST`; judge
+  breaking vs not; report "no *known* consumers" with the manifest's date rather than "no consumers".
 
 ## Install
 

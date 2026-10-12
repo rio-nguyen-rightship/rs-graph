@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DebouncedReindexer, isIgnored, isRelevantFile } from "./watch.js";
+import { createManifestRefresher, DebouncedReindexer, isIgnored, isRelevantFile } from "./watch.js";
 
 describe("isIgnored", () => {
   it("ignores common build/dependency/VCS directories regardless of position in the path", () => {
@@ -82,5 +82,61 @@ describe("DebouncedReindexer", () => {
     reindexer.notifyChange();
     await vi.advanceTimersByTimeAsync(10);
     expect(reindex).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("createManifestRefresher", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("regenerates once for a burst of repos finishing their reindex together", async () => {
+    const generate = vi.fn().mockReturnValue({ written: [], unchanged: ["a", "b"], skipped: [] });
+    const refresher = createManifestRefresher("/ws/workspace.json", generate, 10);
+
+    refresher.notifyChange();
+    refresher.notifyChange();
+    refresher.notifyChange();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledWith("/ws/workspace.json");
+  });
+
+  it("reports which manifests changed, and stays quiet when none did", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const generate = vi
+      .fn()
+      .mockReturnValueOnce({ written: ["producer"], unchanged: [], skipped: [] })
+      .mockReturnValueOnce({ written: [], unchanged: ["producer"], skipped: [] });
+    const refresher = createManifestRefresher("/ws/workspace.json", generate, 10);
+
+    refresher.notifyChange();
+    await vi.advanceTimersByTimeAsync(10);
+    refresher.notifyChange();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith("[manifest] updated: producer");
+  });
+
+  it("survives a failing regeneration so the watcher keeps running", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const generate = vi.fn().mockImplementationOnce(() => {
+      throw new Error("boom");
+    }).mockReturnValue({ written: [], unchanged: [], skipped: [] });
+    const refresher = createManifestRefresher("/ws/workspace.json", generate, 10);
+
+    refresher.notifyChange();
+    await vi.advanceTimersByTimeAsync(10);
+    refresher.notifyChange();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(2);
   });
 });

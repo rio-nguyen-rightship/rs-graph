@@ -297,15 +297,23 @@ meant to be committed like any other doc so it travels into a single-repo CI che
 automatically as its last step, so it stays in sync with every full workspace reindex without any
 separate hook wiring (a single repo's own `post-merge`/`post-checkout`/`post-rewrite` hook has no
 way to know about `workspace.json`'s other repos, so it can't do this on its own — `index-workspace`
-is the one command that already has the whole workspace in hand). Run
-`rs-graph generate-manifest <workspace.json>` directly if you want to refresh manifests without a
-full reindex.
+is the one command that already has the whole workspace in hand). `rs-graph watch-workspace` also regenerates them (once at startup, then debounced after any repo
+finishes re-indexing), so they track the live graphs instead of only moving on a full workspace
+reindex. Run `rs-graph generate-manifest <workspace.json>` directly to refresh them on demand.
+
+Regeneration is idempotent: a repo's files are rewritten only when their content changed (the
+`generatedAt` timestamp is ignored), so it never leaves a spurious git diff. A *committed* manifest
+is still only as fresh as its last commit — a reviewer should read `generatedAt` and report "no known
+consumers as of <date>", never "no consumers".
 
 **Making a reviewer actually use it:** add a line to the repo's `CLAUDE.md` (next to the cross-repo
 awareness snippet above) telling a reviewer to check `CROSS_REPO_MANIFEST.md` before approving a
 PR that touches a route, message, or event handler — since `/code-review`, an interactive session,
 and a `claude -p "review this PR"` CI step all already read a repo's `CLAUDE.md`, that's the entire
-integration surface needed; no custom review-pipeline code required. A non-Claude bot can parse
+integration surface needed; no custom review-pipeline code required. Where the plugin is
+installed (including a CI job whose Claude action supports plugins), the
+`rs-graph-cross-repo-review` skill carries this checklist, so the CLAUDE.md line is only the
+fallback. A non-Claude bot can parse
 `CROSS_REPO_MANIFEST.json` the same way instead.
 
 Not built yet: a CI step that diffs the manifest between a PR's base and head to auto-flag a
@@ -314,8 +322,9 @@ step is a separate, environment-specific GitHub Actions workflow, worth adding o
 
 ## Claude Code plugin
 
-Instead of pasting the CLAUDE.md snippet below into every repo, install the [plugin](../plugin/README.md):
-a skill carrying the same guidance (loaded only when a question is about code structure), a
+Instead of pasting the CLAUDE.md snippets above into every repo, install the [plugin](../plugin/README.md):
+two skills carrying the same guidance (`rs-graph`, loaded only when a question is about code
+structure, and `rs-graph-cross-repo-review`, for PRs that touch a route/message/event), a
 SessionStart hook that builds or refreshes the graph in the background, and the MCP server
 registration. The hook is built on `rs-graph doctor` (next section).
 
