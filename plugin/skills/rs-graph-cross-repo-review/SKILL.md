@@ -29,6 +29,8 @@ Use whichever source is available, in this order.
 `graph_workspace_signal_consumers`, taking the symbol id from this repo's own graph
 (`graph_get_route_map`, or `graph_search_symbol` with `kind: "MessageContract"` / `"HubEvent"`).
 If one returns empty, call `graph_workspace_status` first — empty can mean a repo isn't indexed yet.
+No MCP tools in this session but a `workspace.json` is reachable? Same tools from the shell:
+`rs-graph query route_consumers --workspace <workspace.json> -a symbolId=<id>`.
 
 **B. `CROSS_REPO_MANIFEST.json` / `.md` at the repo root** — the only option when just this repo is
 checked out. Find the entry by its key:

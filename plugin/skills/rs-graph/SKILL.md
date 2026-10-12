@@ -13,8 +13,8 @@ aliases or casing).
 
 ## 1. Know the graph's state first
 
-The SessionStart hook already built or refreshed the graph and put its status in your context. If
-you need to re-check, run `rs-graph doctor --json` and act on `status`:
+If the plugin's SessionStart hook ran, it already built or refreshed the graph and put its status in
+your context. Otherwise — or to re-check — run `rs-graph doctor --json` and act on `status`:
 
 | status | what it means | what you do |
 | --- | --- | --- |
@@ -26,7 +26,22 @@ you need to re-check, run `rs-graph doctor --json` and act on `status`:
 
 rs-graph never runs restore/build/install itself, and you shouldn't to make it work.
 
-## 2. Pick the tool by question
+## 2. No `graph_*` tools in this session?
+
+If the MCP server isn't registered yet (a repo with no `.mcp.json`, or one added mid-session — MCP
+servers can't be hot-loaded), run the same tools from the shell; same handlers, same answers:
+
+```
+rs-graph query --list                                   # every tool and its parameters
+rs-graph query callers -a filePath=src/Foo.cs -a line=42
+rs-graph query search_symbol -a query=Foo -a scope=name
+rs-graph query route_consumers --workspace ../workspace.json -a symbolId=...
+```
+
+Tool names can be shortened (`callers` = `graph_get_callers`); `-a key=value` is typed from the tool's
+schema, or pass `--json '{...}'`. The rest of this skill applies unchanged.
+
+## 3. Pick the tool by question
 
 | Question | Tool |
 | --- | --- |
@@ -44,7 +59,7 @@ the caller/reference/impact tools.
 
 Treat each new question independently — using Grep once is not a reason to keep using it.
 
-## 3. When Grep/Read is the right call
+## 4. When Grep/Read is the right call
 
 - The question isn't structural: a literal string, config value, log message, TODO, prose in a
   comment or doc.
@@ -53,7 +68,7 @@ Treat each new question independently — using Grep once is not a reason to kee
   **likely stale or degraded index, not proof of zero references** — check status (section 1),
   suggest `rs-graph index` (or `--fresh`), but don't let it block you: grep instead.
 
-## 4. Cross-repo: before saying nothing uses it
+## 5. Cross-repo: before saying nothing uses it
 
 `graph_get_references` and `graph_impact_analysis` only see this repo. Before claiming a route,
 Service Bus message, or SignalR event has no callers/consumers — or before removing or changing one:

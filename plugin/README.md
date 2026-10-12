@@ -27,6 +27,10 @@ Prerequisite: the `rs-graph` CLI on `PATH` (`npm link --workspace @rs-graph/cli`
 
 Restart the session afterwards so the hook and MCP server load.
 
+No plugin (or CI without plugin support)? `rs-graph install-skills [path]` copies both skills into the
+repo's `.claude/skills/` to be committed instead. And with no MCP server registered in a session, the
+skills fall back to `rs-graph query` from the shell.
+
 ## Behaviour and opt-outs
 
 | Env var | Effect |

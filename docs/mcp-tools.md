@@ -328,6 +328,30 @@ structure, and `rs-graph-cross-repo-review`, for PRs that touch a route/message/
 SessionStart hook that builds or refreshes the graph in the background, and the MCP server
 registration. The hook is built on `rs-graph doctor` (next section).
 
+Where the plugin isn't available — a repo that doesn't use it, or a CI job reviewing a PR with only
+that repo checked out — `rs-graph install-skills [path]` (or `install-skills-workspace
+<workspace.json>`) copies both skills into the repo's `.claude/skills/`, where Claude Code loads
+them from the checkout itself. Commit them. An existing file you edited is left alone unless you pass
+`--force`.
+
+## Using the graph from the shell: `rs-graph query`
+
+`rs-graph query <tool> [--repo <path> | --workspace <workspace.json>] [-a key=value ...] [--json '{...}']`
+runs one graph tool through the exact same handlers the MCP server exposes (in-process, so there's no
+second implementation to drift). It's for an agent or script that has a shell but no registered MCP
+server — a repo with no `.mcp.json` yet, or a server added mid-session (MCP servers can't be
+hot-loaded). `rs-graph query --list` prints every tool and its parameters; the tool name can be
+shortened (`callers` for `graph_get_callers`, `route_consumers` for `graph_workspace_route_consumers`);
+`-a` values are typed from the tool's own schema, so numbers and arrays need no quoting; `--json -`
+reads the arguments from stdin; `--pretty` indents the output. Errors, including "not indexed yet",
+go to stderr with exit code 1, and it never creates anything.
+
+```
+rs-graph query search_symbol -a query=OptimizelyService -a scope=name
+rs-graph query callers -a filePath=src/Foo.cs -a line=42
+rs-graph query route_consumers --workspace ../workspace.json -a symbolId=csharp:route:GET:api/v1/vessel/{id}
+```
+
 ## Checking a repo's graph: `rs-graph doctor`
 
 `rs-graph doctor [path] [--json]` is a read-only health check — it never indexes, builds, restores,
