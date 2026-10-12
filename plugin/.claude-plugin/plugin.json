@@ -1,0 +1,6 @@
+{
+  "name": "rs-graph",
+  "version": "0.1.0",
+  "description": "Structural code graph for .NET, TypeScript and Python repos: keeps the graph built, registers the MCP server, and teaches the agent to use it instead of grepping.",
+  "author": { "name": "RightShip" }
+}

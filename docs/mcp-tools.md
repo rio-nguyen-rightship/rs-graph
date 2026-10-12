@@ -312,6 +312,13 @@ Not built yet: a CI step that diffs the manifest between a PR's base and head to
 removed/changed cross-repo dependency. The committed file is the foundational piece — that diffing
 step is a separate, environment-specific GitHub Actions workflow, worth adding once this is in use.
 
+## Claude Code plugin
+
+Instead of pasting the CLAUDE.md snippet below into every repo, install the [plugin](../plugin/README.md):
+a skill carrying the same guidance (loaded only when a question is about code structure), a
+SessionStart hook that builds or refreshes the graph in the background, and the MCP server
+registration. The hook is built on `rs-graph doctor` (next section).
+
 ## Checking a repo's graph: `rs-graph doctor`
 
 `rs-graph doctor [path] [--json]` is a read-only health check — it never indexes, builds, restores,

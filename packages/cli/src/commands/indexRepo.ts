@@ -138,6 +138,9 @@ export interface RunIndexOptions {
    * (e.g. recovering from a database left in a bad state by an interrupted/crashed prior run,
    * or from an older, buggier version of an indexer). */
   fresh?: boolean;
+  /** Skip writing the "rs-graph" entry into the repo's .mcp.json — for callers (the Claude Code
+   * plugin) that supply their own MCP server registration. */
+  skipMcpConfig?: boolean;
 }
 
 function resolveAgainst(targetPath: string, maybeRelative: string): string {
@@ -300,6 +303,7 @@ export async function runIndex(targetPath: string, options: RunIndexOptions = {}
     closeGraphDb(db);
   }
 
+  if (options.skipMcpConfig) return;
   const mcpResult = ensureMcpServerEntry(targetPath, "rs-graph", { command: "rs-graph", args: ["serve", "."] });
   if (mcpResult === "added") {
     console.log('  .mcp.json: added "rs-graph" server entry.');

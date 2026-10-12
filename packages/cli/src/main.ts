@@ -31,8 +31,14 @@ program
   .option("--sln <path>", "specific .sln/.slnx (or .csproj) to index, if a repo has more than one")
   .option("--tsconfig <path>", "specific tsconfig.json to index, if a repo has more than one")
   .option("--fresh", "delete any existing .rs-graph/graph.db first (recovers from a stale/corrupted database)")
-  .action((targetPath: string, opts: { sln?: string; tsconfig?: string; fresh?: boolean }) =>
-    runIndex(path.resolve(targetPath), { slnPath: opts.sln, tsconfigPath: opts.tsconfig, fresh: opts.fresh }),
+  .option("--no-mcp-config", "don't add an rs-graph entry to the repo's .mcp.json (the Claude Code plugin registers the server itself)")
+  .action((targetPath: string, opts: { sln?: string; tsconfig?: string; fresh?: boolean; mcpConfig?: boolean }) =>
+    runIndex(path.resolve(targetPath), {
+      slnPath: opts.sln,
+      tsconfigPath: opts.tsconfig,
+      fresh: opts.fresh,
+      skipMcpConfig: opts.mcpConfig === false,
+    }),
   );
 
 program

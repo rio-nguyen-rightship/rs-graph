@@ -127,6 +127,7 @@ packages/
   cli/                       rs-graph init|index|watch|watch-workspace|serve|index-workspace|
                              serve-workspace|install-hook|install-hook-workspace|generate-manifest|doctor
   eval/                       benchmark harness comparing rs-graph vs. grep/read (see packages/eval/README.md)
+plugin/                   Claude Code plugin: skill + SessionStart hook + MCP registration (see plugin/README.md)
 fixtures/                 one small sample project per language, plus sample-workspace (two tiny
                           repos wired together, used as the cross-repo integration-test target)
 templates/
