@@ -47,6 +47,10 @@ rs-graph watch .
 rs-graph serve .
 ```
 
+`serve` never creates anything: if the repo isn't indexed yet it still starts, and every tool call returns "not indexed yet" until
+`.rs-graph/graph.db` appears — then it answers without a restart. So `serve` can be registered (or launched by Claude) before or
+while `rs-graph index` runs.
+
 To remove it later: `npm unlink --workspace @rs-graph/cli` (or `npm uninstall -g @rs-graph/cli`).
 
 If a repo has more than one `.sln`/`.slnx` or `tsconfig.json`, `index`/`watch` otherwise just

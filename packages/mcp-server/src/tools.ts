@@ -85,7 +85,8 @@ const SYMBOL_KIND = z.enum([
 /** Registers every rs-graph MCP tool against an already-open graph database. Kept as one
  * function (rather than a class) since every tool is a thin, stateless wrapper over a
  * graph-store query function — there's no shared mutable state to justify more structure. */
-export function registerTools(server: McpServer, db: GraphDb): void {
+export function registerTools(server: McpServer, dbOrGetter: GraphDb | (() => GraphDb)): void {
+  const getDb = typeof dbOrGetter === "function" ? dbOrGetter : () => dbOrGetter;
   const pageArgs = {
     limit: z.number().int().positive().max(500).optional(),
     offset: z.number().int().nonnegative().optional(),
@@ -100,7 +101,7 @@ export function registerTools(server: McpServer, db: GraphDb): void {
         "first to orient yourself in a codebase before making more targeted queries.",
       inputSchema: {},
     },
-    () => jsonResult(getStats(db)),
+    () => jsonResult(getStats(getDb())),
   );
 
   server.registerTool(
@@ -131,7 +132,7 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       },
     },
     ({ query, kind, language, limit, scope, detail }) =>
-      jsonResult(searchSymbol(db, { query, kind, language, limit, scope }).map((s) => projectSymbol(s, detail))),
+      jsonResult(searchSymbol(getDb(), { query, kind, language, limit, scope }).map((s) => projectSymbol(s, detail))),
   );
 
   server.registerTool(
@@ -148,7 +149,7 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       inputSchema: { filePath: z.string().describe("Repo-relative file path"), ...pageArgs, detail: detailParam },
     },
     ({ filePath, limit, offset, detail }) => {
-      const outline = getFileOutline(db, filePath, { limit, offset });
+      const outline = getFileOutline(getDb(), filePath, { limit, offset });
       return jsonResult({ symbols: outline.symbols.map((s) => projectSymbol(s, detail)), truncated: outline.truncated });
     },
   );
@@ -164,11 +165,11 @@ export function registerTools(server: McpServer, db: GraphDb): void {
     },
     ({ symbolId, filePath, line }) => {
       if (symbolId) {
-        const symbol = getSymbolById(db, symbolId);
+        const symbol = getSymbolById(getDb(), symbolId);
         return symbol ? jsonResult(symbol) : errorResult(`No symbol found with id ${symbolId}`);
       }
       if (filePath && line) {
-        const symbol = getDefinitionAtLocation(db, filePath, line);
+        const symbol = getDefinitionAtLocation(getDb(), filePath, line);
         return symbol ? jsonResult(symbol) : errorResult(noSymbolAtLocationError(filePath, line));
       }
       return errorResult("Provide either symbolId or filePath+line");
@@ -188,9 +189,9 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       inputSchema: { ...symbolRefArgs, ...pageArgs, detail: detailParam },
     },
     ({ symbolId, filePath, line, limit, offset, detail }) => {
-      const resolved = resolveSymbolId(db, { symbolId, filePath, line });
+      const resolved = resolveSymbolId(getDb(), { symbolId, filePath, line });
       if ("error" in resolved) return errorResult(resolved.error);
-      return jsonResult(getReferences(db, resolved.id, { limit, offset }).map((hit) => projectReferenceHit(hit, detail)));
+      return jsonResult(getReferences(getDb(), resolved.id, { limit, offset }).map((hit) => projectReferenceHit(hit, detail)));
     },
   );
 
@@ -205,9 +206,9 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       inputSchema: { ...symbolRefArgs, ...pageArgs, detail: detailParam },
     },
     ({ symbolId, filePath, line, limit, offset, detail }) => {
-      const resolved = resolveSymbolId(db, { symbolId, filePath, line });
+      const resolved = resolveSymbolId(getDb(), { symbolId, filePath, line });
       if ("error" in resolved) return errorResult(resolved.error);
-      return jsonResult(getCallers(db, resolved.id, { limit, offset }).map((hit) => projectReferenceHit(hit, detail)));
+      return jsonResult(getCallers(getDb(), resolved.id, { limit, offset }).map((hit) => projectReferenceHit(hit, detail)));
     },
   );
 
@@ -219,9 +220,9 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       inputSchema: { ...symbolRefArgs, ...pageArgs, detail: detailParam },
     },
     ({ symbolId, filePath, line, limit, offset, detail }) => {
-      const resolved = resolveSymbolId(db, { symbolId, filePath, line });
+      const resolved = resolveSymbolId(getDb(), { symbolId, filePath, line });
       if ("error" in resolved) return errorResult(resolved.error);
-      return jsonResult(getCallees(db, resolved.id, { limit, offset }).map((hit) => projectReferenceHit(hit, detail)));
+      return jsonResult(getCallees(getDb(), resolved.id, { limit, offset }).map((hit) => projectReferenceHit(hit, detail)));
     },
   );
 
@@ -235,9 +236,9 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       inputSchema: { ...symbolRefArgs, detail: detailParam },
     },
     ({ symbolId, filePath, line, detail }) => {
-      const resolved = resolveSymbolId(db, { symbolId, filePath, line });
+      const resolved = resolveSymbolId(getDb(), { symbolId, filePath, line });
       if ("error" in resolved) return errorResult(resolved.error);
-      const hierarchy = getClassHierarchy(db, resolved.id);
+      const hierarchy = getClassHierarchy(getDb(), resolved.id);
       return jsonResult({
         ancestors: hierarchy.ancestors.map((s) => projectWithDepth(s, detail)),
         descendants: hierarchy.descendants.map((s) => projectWithDepth(s, detail)),
@@ -252,7 +253,7 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       description: "Files a given file imports, and files that import it — the import graph in both directions.",
       inputSchema: { filePath: z.string() },
     },
-    ({ filePath }) => jsonResult(getDependencies(db, filePath)),
+    ({ filePath }) => jsonResult(getDependencies(getDb(), filePath)),
   );
 
   server.registerTool(
@@ -273,9 +274,9 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       },
     },
     ({ symbolId, filePath, line, depth, maxResults, detail }) => {
-      const resolved = resolveSymbolId(db, { symbolId, filePath, line });
+      const resolved = resolveSymbolId(getDb(), { symbolId, filePath, line });
       if ("error" in resolved) return errorResult(resolved.error);
-      const result = impactAnalysis(db, resolved.id, depth, maxResults);
+      const result = impactAnalysis(getDb(), resolved.id, depth, maxResults);
       return jsonResult({ symbols: result.symbols.map((s) => projectWithDepth(s, detail)), truncated: result.truncated });
     },
   );
@@ -290,7 +291,7 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       inputSchema: { ...pageArgs, detail: detailParam },
     },
     ({ limit, offset, detail }) => {
-      const result = getRouteMap(db, { limit, offset });
+      const result = getRouteMap(getDb(), { limit, offset });
       return jsonResult({
         routes: result.routes.map((r) => ({
           route: projectSymbol(r.route, detail),
@@ -311,7 +312,7 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       inputSchema: { ...pageArgs, detail: detailParam },
     },
     ({ limit, offset, detail }) => {
-      const result = getDiGraph(db, { limit, offset });
+      const result = getDiGraph(getDb(), { limit, offset });
       return jsonResult({
         registrations: result.registrations.map((r) => ({
           registration: projectSymbol(r.registration, detail),
@@ -345,7 +346,7 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       },
     },
     ({ componentId, limit, offset, maxBoundSymbols, detail }) => {
-      const result = getComponentTree(db, { componentId, limit, offset, maxBoundSymbols });
+      const result = getComponentTree(getDb(), { componentId, limit, offset, maxBoundSymbols });
       return jsonResult({
         components: result.components.map((c) => ({
           component: c.component,
@@ -374,7 +375,7 @@ export function registerTools(server: McpServer, db: GraphDb): void {
       },
     },
     ({ seedSymbolIds, hops, maxSymbols, detail }) => {
-      const pack = contextPack(db, seedSymbolIds, hops, maxSymbols);
+      const pack = contextPack(getDb(), seedSymbolIds, hops, maxSymbols);
       return jsonResult({
         symbols: pack.symbols.map((s) => projectSymbol(s, detail)),
         edges: pack.edges,
