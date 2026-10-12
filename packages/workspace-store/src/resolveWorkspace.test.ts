@@ -122,6 +122,45 @@ describe("createLiveCrossRepoIndex", () => {
     expect(getIndex().skippedRepos).toEqual([]);
   });
 
+  it("sees a re-index whose commit is still only in the WAL because another process holds the db open", () => {
+    // Real setup: each repo's single-repo `rs-graph serve` keeps graph.db open for the life of the
+    // session. While any connection is open, a writer's close doesn't checkpoint the WAL back into
+    // the main file, so graph.db's own mtime doesn't move — only graph.db-wal's does.
+    const repo = makeRepo("held-open-repo");
+    seedDb(repo, () => {});
+    const getIndex = createLiveCrossRepoIndex([repo]);
+    getIndex();
+
+    const longLivedReader = openGraphDb({ dbPath: repoDbPath(repo) });
+    try {
+      longLivedReader.prepare("SELECT COUNT(*) FROM Symbol").get();
+      const writer = openGraphDb({ dbPath: repoDbPath(repo) });
+      insertSymbol(writer, "csharp:route:GET:api/held", "GET api/held", "Route");
+      closeGraphDb(writer);
+
+      expect(lookupCrossRepo(getIndex(), "Route", "csharp:route:GET:api/held").owners).toHaveLength(1);
+    } finally {
+      closeGraphDb(longLivedReader);
+    }
+  });
+
+  it("treats a db that exists but has no schema yet (index still starting) as not-yet-indexed, not an error", () => {
+    const healthy = makeRepo("healthy");
+    seedDb(healthy, (db) => insertSymbol(db, "csharp:route:GET:api/ok", "GET api/ok", "Route"));
+    const starting = makeRepo("starting");
+    fs.mkdirSync(path.dirname(repoDbPath(starting)), { recursive: true });
+    fs.writeFileSync(repoDbPath(starting), "");
+
+    const getIndex = createLiveCrossRepoIndex([healthy, starting]);
+
+    expect(getIndex().skippedRepos).toEqual(["starting"]);
+    expect(lookupCrossRepo(getIndex(), "Route", "csharp:route:GET:api/ok").owners).toHaveLength(1);
+
+    fs.rmSync(repoDbPath(starting));
+    seedDb(starting, () => {});
+    expect(getIndex().skippedRepos).toEqual([]);
+  });
+
   it("does not rebuild when nothing changed", () => {
     const repo = makeRepo("stable-repo");
     seedDb(repo, (db) => insertSymbol(db, "csharp:route:GET:api/stable", "GET api/stable", "Route"));
