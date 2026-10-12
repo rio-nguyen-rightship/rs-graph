@@ -312,6 +312,25 @@ Not built yet: a CI step that diffs the manifest between a PR's base and head to
 removed/changed cross-repo dependency. The committed file is the foundational piece — that diffing
 step is a separate, environment-specific GitHub Actions workflow, worth adding once this is in use.
 
+## Checking a repo's graph: `rs-graph doctor`
+
+`rs-graph doctor [path] [--json]` is a read-only health check — it never indexes, builds, restores,
+or writes anything. It reports one status:
+
+| Status | Meaning | Next step |
+| --- | --- | --- |
+| `missing` | No graph yet (or an index run is still creating it) | `rs-graph index <path>` |
+| `needs-build` | At least half the .NET projects have no `obj/project.assets.json`, so references can't resolve and the graph would be hollow | Restore/build the solution yourself (rs-graph never does), then `rs-graph index` |
+| `stale` | Source files (`.cs .ts .tsx .html .py`) changed after the last index started | `rs-graph index <path>` (incremental) |
+| `degraded` | Up to date, but the .NET indexer couldn't resolve many declaration types at index time (50+) — callers/references through those types will be missing | Make sure the solution is restored and built, then `rs-graph index --fresh` |
+| `ok` | Nothing to do | — |
+
+It also reports whether `.mcp.json` registers `rs-graph`, whether `.rs-graph/` is git-ignored, and
+whether the three git hooks are installed. `--json` prints the same report for scripts, hooks, and
+agent skills. The "degraded" signal comes from `.rs-graph/index-report.json`, which every `index`
+run writes next to `graph.db` (the .NET indexer counts unresolved declaration references; it's a
+cheap declaration-diagnostics pass, not a full compile).
+
 ## Keeping the graph fresh across `git pull`, branch switches, and rebases
 
 Nothing re-indexes automatically just because the working tree changed underneath you — without

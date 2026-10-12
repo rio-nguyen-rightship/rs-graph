@@ -35,7 +35,7 @@ export interface ProjectDetection {
 /** Bounded breadth-first walk skipping build output / dependency / VCS directories. Good
  * enough for project-type detection; the real per-language indexers do their own precise
  * project-file discovery (e.g. following .sln references) once a language is known. */
-function walk(root: string, maxFiles = 20_000): string[] {
+export function walk(root: string, maxFiles = 20_000): string[] {
   const results: string[] = [];
   const stack: string[] = [root];
   while (stack.length > 0 && results.length < maxFiles) {

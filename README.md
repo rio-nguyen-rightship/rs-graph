@@ -125,7 +125,7 @@ packages/
   mcp-server/               MCP tools, thin wrappers over graph-store's queries
   workspace-store/          cross-repo join index (routes/messages/SignalR events) for the workspace tools
   cli/                       rs-graph init|index|watch|watch-workspace|serve|index-workspace|
-                             serve-workspace|install-hook|install-hook-workspace|generate-manifest
+                             serve-workspace|install-hook|install-hook-workspace|generate-manifest|doctor
   eval/                       benchmark harness comparing rs-graph vs. grep/read (see packages/eval/README.md)
 fixtures/                 one small sample project per language, plus sample-workspace (two tiny
                           repos wired together, used as the cross-repo integration-test target)

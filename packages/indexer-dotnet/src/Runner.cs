@@ -1,5 +1,6 @@
 using Microsoft.Build.Evaluation;
 using Microsoft.CodeAnalysis;
+using System.Text.Json;
 using Microsoft.CodeAnalysis.CSharp;
 
 namespace RsGraph.Indexer.Dotnet;
@@ -45,6 +46,7 @@ public static class Runner
         // why re-resolving the same BCL/NuGet dll into a fresh MetadataReference per project
         // breaks generic type resolution across project boundaries.
         var referenceCache = new Dictionary<string, MetadataReference>(StringComparer.OrdinalIgnoreCase);
+        var unresolvedByProject = new List<(string Project, int Errors)>();
 
         foreach (var project in ordered)
         {
@@ -86,11 +88,32 @@ public static class Runner
 
             var owned = new HashSet<string>(project.CompileItems, StringComparer.OrdinalIgnoreCase);
             builder.Process(compilation, owned);
+            unresolvedByProject.Add((project.AssemblyName, CompilationStats.CountUnresolvedReferences(compilation, owned)));
         }
 
         externalSymbols.Flush(writer);
+        WriteStats(unresolvedByProject);
         return 0;
     }
+
+    /// <summary>One machine-readable line on stderr (stdout is the NDJSON record stream); the CLI
+    /// strips and parses it — see runDotnetIndexer in the CLI's indexRepo.ts.</summary>
+    private static void WriteStats(List<(string Project, int Errors)> unresolvedByProject)
+    {
+        var stats = new
+        {
+            projects = unresolvedByProject.Count,
+            unresolvedReferenceErrors = unresolvedByProject.Sum(p => p.Errors),
+            worstProjects = unresolvedByProject
+                .Where(p => p.Errors > 0)
+                .OrderByDescending(p => p.Errors)
+                .Take(5)
+                .Select(p => new { project = p.Project, errors = p.Errors }),
+        };
+        Console.Error.WriteLine($"{StatsMarker}{JsonSerializer.Serialize(stats)}");
+    }
+
+    public const string StatsMarker = "RS_GRAPH_STATS ";
 
     private static string? TryFindOutputDll(string csprojPath)
     {

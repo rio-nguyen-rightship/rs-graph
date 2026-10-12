@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import * as path from "node:path";
+import { runDoctor } from "./commands/doctor.js";
 import { runGenerateManifest } from "./commands/generateManifest.js";
 import { runInit } from "./commands/init.js";
 import { runIndex } from "./commands/indexRepo.js";
@@ -97,5 +98,14 @@ program
   .action((workspaceConfig: string, opts: { fresh?: boolean }) =>
     runWatchWorkspace(path.resolve(workspaceConfig), { fresh: opts.fresh }),
   );
+
+program
+  .command("doctor")
+  .description(
+    "Report whether this repo's graph is missing, stale, needs a .NET restore/build first, or looks degraded — read-only, never indexes or builds",
+  )
+  .argument("[path]", "target repo path", ".")
+  .option("--json", "machine-readable output (for hooks and agent skills)")
+  .action((targetPath: string, opts: { json?: boolean }) => runDoctor(path.resolve(targetPath), { json: opts.json }));
 
 program.parseAsync(process.argv);
