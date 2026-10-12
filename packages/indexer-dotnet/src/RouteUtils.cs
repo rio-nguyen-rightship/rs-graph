@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace RsGraph.Indexer.Dotnet;
 
 /// <summary>Normalizes ASP.NET Core route templates and builds a Route Symbol's id from the
@@ -7,7 +9,17 @@ namespace RsGraph.Indexer.Dotnet;
 /// which method actually handles the route.</summary>
 public static class RouteUtils
 {
-    public static string NormalizeTemplate(string template) => template.Trim('/').ToLowerInvariant();
+    private static readonly Regex RouteParamPattern = new(@"\{[^}/]+\}", RegexOptions.Compiled);
+
+    /// <summary>Collapses every `{paramName}` segment to a fixed placeholder before comparing, so
+    /// two templates match by path *shape* rather than needing identical parameter names. An
+    /// NSwag-generated [RouteUrl] happens to mirror the producer's own parameter name (it's
+    /// generated from the producer's OpenAPI spec), but a hand-written HttpClient/Angular
+    /// HttpClient call site never does — its URL carries whatever local variable name the caller
+    /// chose (`vesselId`, not the route's own `{id}`), so matching on the literal parameter name
+    /// would silently fail to join the overwhelming majority of hand-written calls.</summary>
+    public static string NormalizeTemplate(string template) =>
+        RouteParamPattern.Replace(template.Trim('/').ToLowerInvariant(), "{}");
 
     public static string BuildRouteId(string verb, string normalizedTemplate) =>
         $"csharp:route:{verb.ToUpperInvariant()}:{normalizedTemplate}";

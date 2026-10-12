@@ -32,14 +32,18 @@ describe("installHook", () => {
     fs.rmSync(repoPath, { recursive: true, force: true });
   });
 
-  it("copies the hook template to .githooks/post-merge and points core.hooksPath at it", () => {
+  const HOOK_NAMES = ["post-merge", "post-checkout", "post-rewrite"];
+
+  it("copies every hook template into .githooks/ and points core.hooksPath at it", () => {
     installHook(repoPath);
 
-    const hookPath = path.join(repoPath, ".githooks", "post-merge");
-    expect(fs.existsSync(hookPath)).toBe(true);
-    const hookContent = fs.readFileSync(hookPath, "utf8");
-    expect(hookContent).toContain("rs-graph index");
-    expect(hookContent).toContain("nohup");
+    for (const name of HOOK_NAMES) {
+      const hookPath = path.join(repoPath, ".githooks", name);
+      expect(fs.existsSync(hookPath)).toBe(true);
+      const hookContent = fs.readFileSync(hookPath, "utf8");
+      expect(hookContent).toContain("rs-graph index");
+      expect(hookContent).toContain("nohup");
+    }
 
     expect(getHooksPath(repoPath)).toBe(".githooks");
   });
@@ -50,9 +54,11 @@ describe("installHook", () => {
 
     installHook(repoPath);
 
-    // The hook file is still installed (so the user can move it manually), but the existing
+    // The hook files are still installed (so the user can move them manually), but the existing
     // customization is left untouched rather than silently overwritten.
-    expect(fs.existsSync(path.join(repoPath, ".githooks", "post-merge"))).toBe(true);
+    for (const name of HOOK_NAMES) {
+      expect(fs.existsSync(path.join(repoPath, ".githooks", name))).toBe(true);
+    }
     expect(getHooksPath(repoPath)).toBe("custom-hooks");
   });
 
@@ -61,7 +67,9 @@ describe("installHook", () => {
     installHook(repoPath);
 
     expect(getHooksPath(repoPath)).toBe(".githooks");
-    expect(fs.existsSync(path.join(repoPath, ".githooks", "post-merge"))).toBe(true);
+    for (const name of HOOK_NAMES) {
+      expect(fs.existsSync(path.join(repoPath, ".githooks", name))).toBe(true);
+    }
   });
 });
 
@@ -91,11 +99,13 @@ describe("installHookWorkspace", () => {
     fs.rmSync(workspaceDir, { recursive: true, force: true });
   });
 
-  it("installs the hook into every repo listed in the workspace config", () => {
+  it("installs every hook into every repo listed in the workspace config", () => {
     installHookWorkspace(workspaceConfigPath);
 
     for (const repo of [repoA, repoB]) {
-      expect(fs.existsSync(path.join(repo, ".githooks", "post-merge"))).toBe(true);
+      for (const name of ["post-merge", "post-checkout", "post-rewrite"]) {
+        expect(fs.existsSync(path.join(repo, ".githooks", name))).toBe(true);
+      }
       expect(getHooksPath(repo)).toBe(".githooks");
     }
   });

@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { ExternalSymbolRegistry, type GraphRecord } from "@rs-graph/core-schema";
 import { AngularEnricher } from "./angularEnrichment.js";
 import { TsGraphBuilder } from "./graphBuilder.js";
+import { HttpClientEnrichment } from "./httpClientEnrichment.js";
 import { loadProgram } from "./program.js";
 import { ArraySink } from "./sink.js";
 
@@ -21,6 +22,7 @@ describe("TsGraphBuilder + AngularEnricher against fixtures/sample-angular-app",
 
     new TsGraphBuilder(FIXTURE_ROOT, sink, externalSymbols, checker, ownedFiles, compilerOptions).process(program);
     new AngularEnricher(FIXTURE_ROOT, sink, checker, ownedFiles).process(program);
+    new HttpClientEnrichment(FIXTURE_ROOT, sink, checker, ownedFiles).process(program);
     for (const record of externalSymbols.flush()) sink.write(record);
 
     records = sink.records;
@@ -34,7 +36,11 @@ describe("TsGraphBuilder + AngularEnricher against fixtures/sample-angular-app",
   }
 
   it("emits repo-relative file paths, not absolute ones", () => {
-    const files = records.filter((r) => r.record === "file");
+    // Excludes external:... stub file rows (ExternalSymbolRegistry's own File record for a
+    // referenced-but-not-owned package, e.g. @angular/common once VesselLookupService both
+    // injects and calls a method on its HttpClient) — those are synthetic package markers by
+    // design, not repo-relative source paths, and never claimed to be either.
+    const files = records.filter((r) => r.record === "file" && !r.path.startsWith("external:"));
     expect(files.length).toBeGreaterThan(0);
     for (const f of files) {
       if (f.record !== "file") continue;
@@ -192,12 +198,26 @@ describe("TsGraphBuilder + AngularEnricher against fixtures/sample-angular-app",
     );
   });
 
+  it("extracts an INVOKES_ROUTE edge from a real Angular HttpClient call site", () => {
+    // VesselLookupService.lookup calls this.http.get with an interpolated URL — no generated
+    // client, no attribute to read. The interpolated {vesselId} slot collapses to the same {}
+    // placeholder normalizeRouteTemplate uses for a producer's own {id}-style route parameter,
+    // since the caller's local variable name has no reason to match it.
+    const invokesRoute = edgesByType("INVOKES_ROUTE").filter(
+      (e) => e.record === "edge" && e.from === "typescript:src/vessel-lookup.service.ts#VesselLookupService.lookup",
+    );
+    expect(invokesRoute).toHaveLength(1);
+    expect(invokesRoute[0]?.record === "edge" && invokesRoute[0].to).toBe("xrepo:route:api/v1/vessel/{}");
+  });
+
   it("is idempotent at the id level: re-running produces the same ids", () => {
     const { program, checker, ownedFiles, compilerOptions } = loadProgram(TSCONFIG);
     const sink2 = new ArraySink();
     const externalSymbols2 = new ExternalSymbolRegistry("typescript", (d) => `external:${d.groupKey ?? "unknown"}`);
     new TsGraphBuilder(FIXTURE_ROOT, sink2, externalSymbols2, checker, ownedFiles, compilerOptions).process(program);
     new AngularEnricher(FIXTURE_ROOT, sink2, checker, ownedFiles).process(program);
+    new HttpClientEnrichment(FIXTURE_ROOT, sink2, checker, ownedFiles).process(program);
+    for (const record of externalSymbols2.flush()) sink2.write(record);
 
     const firstRunIds = records
       .filter((r): r is Extract<GraphRecord, { record: "symbol" }> => r.record === "symbol")

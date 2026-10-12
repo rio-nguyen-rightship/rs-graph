@@ -14,20 +14,43 @@ namespace RsGraph.Indexer.Dotnet;
 ///      empty — no restore is triggered to produce it.
 /// `MetadataReference.CreateFromFile` only parses ECMA-335 metadata tables; it never loads or
 /// executes the assembly, so this is safe even for third-party binaries.
+///
+/// `cache` must be the same dictionary across every project in one indexing run, keyed by dll
+/// path, so every project's compilation references the identical MetadataReference object
+/// instance for a given file rather than a fresh one each time.
 /// </summary>
 public static class ReferenceResolver
 {
-    public static List<MetadataReference> Resolve(LoadedProject project)
+    public static List<MetadataReference> Resolve(LoadedProject project, Dictionary<string, MetadataReference> cache)
     {
         var refs = new List<MetadataReference>();
-        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Framework ref-pack assemblies are added first and win by filename: a NuGet package
+        // that also ships an assembly the shared framework already provides (common — e.g. a
+        // package depending on Microsoft.Extensions.Logging, which is also part of
+        // Microsoft.AspNetCore.App.Ref) must not add a second, differently-versioned copy of the
+        // identical assembly name. Real `dotnet build` conflict-resolves the same way — the
+        // runtime only ever loads the framework's copy of a platform assembly regardless of what
+        // was referenced at compile time. Without this, two assemblies claiming the same name
+        // leave Roslyn's binder unable to resolve basic BCL types at all — not just the
+        // specifically-duplicated one, since type-forwarding between them becomes ambiguous — a
+        // real repo indexed with this bug present had every call through a Task<T>-returning
+        // interface method silently missing its CALLS edge, with nothing surfaced to the user.
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         void AddRef(string dllPath)
         {
-            if (!seenPaths.Add(dllPath) || !File.Exists(dllPath)) return;
+            if (!seenNames.Add(Path.GetFileName(dllPath))) return;
+            if (cache.TryGetValue(dllPath, out var cached))
+            {
+                refs.Add(cached);
+                return;
+            }
+            if (!File.Exists(dllPath)) return;
             try
             {
-                refs.Add(MetadataReference.CreateFromFile(dllPath));
+                var reference = MetadataReference.CreateFromFile(dllPath);
+                cache[dllPath] = reference;
+                refs.Add(reference);
             }
             catch
             {

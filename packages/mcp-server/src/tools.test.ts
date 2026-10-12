@@ -150,6 +150,11 @@ describe("mcp-server tools (via a real MCP Client<->Server pair)", () => {
     // the real regression this guards is an actual multi-megabyte response from an unbounded
     // component tree in a real Angular app; see queries.ts's getComponentTree for the full story.
     const extra: GraphRecord[] = [
+      // A same-language ingest batch always represents the indexer's complete rescan of that
+      // language, so unchanged FIXTURE files must be re-listed here too — otherwise ingest.ts
+      // treats them as deleted from disk (see ingest.ts's deletedFiles handling).
+      { record: "file", path: "src/Foo.ts", language: "typescript", contentHash: "h1", sizeBytes: 10 },
+      { record: "file", path: "src/Bar.ts", language: "typescript", contentHash: "h2", sizeBytes: 10 },
       { record: "file", path: "src/Extra.ts", language: "typescript", contentHash: "hextra", sizeBytes: 10 },
       {
         record: "symbol",
@@ -229,6 +234,8 @@ describe("mcp-server tools (via a real MCP Client<->Server pair)", () => {
     // per-component boundSymbols. componentId sidesteps the list/pagination question entirely for
     // the common case of wanting one specific component's bindings.
     const extra: GraphRecord[] = [
+      { record: "file", path: "src/Foo.ts", language: "typescript", contentHash: "h1", sizeBytes: 10 },
+      { record: "file", path: "src/Bar.ts", language: "typescript", contentHash: "h2", sizeBytes: 10 },
       { record: "file", path: "src/Big.ts", language: "typescript", contentHash: "hbig", sizeBytes: 10 },
       { record: "symbol", id: "BigComponent", name: "BigComponent", kind: "Class", signature: "class BigComponent", filePath: "src/Big.ts", startLine: 1, endLine: 20, modifiers: [], external: false },
       { record: "symbol", id: "BigComponent.a", name: "a", kind: "Property", signature: "a", filePath: "src/Big.ts", startLine: 2, endLine: 2, modifiers: [], external: false },
@@ -260,6 +267,8 @@ describe("mcp-server tools (via a real MCP Client<->Server pair)", () => {
 
   it("graph_get_route_map accepts limit/offset with a truncated flag", async () => {
     const extraRoutes: GraphRecord[] = [
+      { record: "file", path: "src/Foo.ts", language: "typescript", contentHash: "h1", sizeBytes: 10 },
+      { record: "file", path: "src/Bar.ts", language: "typescript", contentHash: "h2", sizeBytes: 10 },
       { record: "file", path: "src/Extra.ts", language: "typescript", contentHash: "hextra", sizeBytes: 10 },
       { record: "symbol", id: "Route.A", name: "GET /a", kind: "Route", signature: "GET /a", filePath: "src/Extra.ts", startLine: 1, endLine: 1, modifiers: [], external: false },
       { record: "symbol", id: "Route.B", name: "GET /b", kind: "Route", signature: "GET /b", filePath: "src/Extra.ts", startLine: 2, endLine: 2, modifiers: [], external: false },

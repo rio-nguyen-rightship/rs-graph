@@ -100,15 +100,71 @@ export function buildCrossRepoIndex(repos: WorkspaceRepoConfig[]): CrossRepoInde
       continue;
     }
 
-    const db = openGraphDb({ dbPath });
+    // One repo's graph being unreadable (an index run still creating it, a locked or corrupt
+    // file) must not take down lookups for every other repo — treat it as not-yet-indexed.
+    let db: GraphDb | undefined;
     try {
+      db = openGraphDb({ dbPath, mustExist: true });
+      const hasSchema = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'Symbol'").get();
+      if (!hasSchema) {
+        skippedRepos.push(repo.name);
+        continue;
+      }
       scanRepo(db, repo.name, ownersByKey, referencesByKey);
+    } catch (err) {
+      console.error(`rs-graph: skipping ${repo.name} — couldn't read ${dbPath}: ${err instanceof Error ? err.message : err}`);
+      skippedRepos.push(repo.name);
     } finally {
-      closeGraphDb(db);
+      if (db) closeGraphDb(db);
     }
   }
 
   return { ownersByKey, referencesByKey, skippedRepos };
+}
+
+/** Newest write to a repo's graph, or -1 when it has none. Includes the WAL file: while any
+ * connection (e.g. that repo's own long-lived `rs-graph serve`) stays open, a writer's commits
+ * sit in graph.db-wal and graph.db's own mtime doesn't move until the next checkpoint. */
+function currentDbMtimes(repos: WorkspaceRepoConfig[]): Map<string, number> {
+  const mtimes = new Map<string, number>();
+  for (const repo of repos) {
+    const dbPath = repoDbPath(repo);
+    const newest = [dbPath, `${dbPath}-wal`].reduce(
+      (latest, file) => (fs.existsSync(file) ? Math.max(latest, fs.statSync(file).mtimeMs) : latest),
+      -1,
+    );
+    mtimes.set(repo.name, newest);
+  }
+  return mtimes;
+}
+
+function mtimesEqual(a: Map<string, number>, b: Map<string, number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [name, mtime] of a) {
+    if (b.get(name) !== mtime) return false;
+  }
+  return true;
+}
+
+/**
+ * Wraps buildCrossRepoIndex with lazy, per-call freshness checking, so a long-lived
+ * `serve-workspace` process doesn't need a restart to see a repo re-indexed by `watch-workspace`
+ * or a git hook while it's running. Cheap when nothing changed (one `statSync` per repo); only
+ * pays for a full rebuild when some repo's graph.db mtime actually moved (including a repo that
+ * just got indexed for the first time, via the -1 sentinel for "no db yet").
+ */
+export function createLiveCrossRepoIndex(repos: WorkspaceRepoConfig[]): () => CrossRepoIndex {
+  let index = buildCrossRepoIndex(repos);
+  let lastMtimes = currentDbMtimes(repos);
+
+  return () => {
+    const nowMtimes = currentDbMtimes(repos);
+    if (!mtimesEqual(lastMtimes, nowMtimes)) {
+      index = buildCrossRepoIndex(repos);
+      lastMtimes = nowMtimes;
+    }
+    return index;
+  };
 }
 
 export interface CrossRepoLookupResult {

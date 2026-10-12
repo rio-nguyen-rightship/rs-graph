@@ -47,6 +47,10 @@ rs-graph watch .
 rs-graph serve .
 ```
 
+`serve` never creates anything: if the repo isn't indexed yet it still starts, and every tool call returns "not indexed yet" until
+`.rs-graph/graph.db` appears — then it answers without a restart. So `serve` can be registered (or launched by Claude) before or
+while `rs-graph index` runs.
+
 To remove it later: `npm unlink --workspace @rs-graph/cli` (or `npm uninstall -g @rs-graph/cli`).
 
 If a repo has more than one `.sln`/`.slnx` or `tsconfig.json`, `index`/`watch` otherwise just
@@ -120,13 +124,17 @@ packages/
   indexer-python/          ast-based Python indexer + Flask/FastAPI/Django route enrichment
   mcp-server/               MCP tools, thin wrappers over graph-store's queries
   workspace-store/          cross-repo join index (routes/messages/SignalR events) for the workspace tools
-  cli/                       rs-graph init|index|watch|serve|index-workspace|serve-workspace|
-                             install-hook|install-hook-workspace
+  cli/                       rs-graph init|index|watch|watch-workspace|serve|index-workspace|
+                             serve-workspace|install-hook|install-hook-workspace|generate-manifest|doctor|
+                             query|install-skills|install-skills-workspace
   eval/                       benchmark harness comparing rs-graph vs. grep/read (see packages/eval/README.md)
+plugin/                   Claude Code plugin: skill + SessionStart hook + MCP registration (see plugin/README.md)
 fixtures/                 one small sample project per language, plus sample-workspace (two tiny
                           repos wired together, used as the cross-repo integration-test target)
 templates/
-  post-merge.sample         git post-merge hook, installed by `rs-graph install-hook`
+  post-merge.sample         git hooks re-indexing in the background — pull/merge, branch switch,
+  post-checkout.sample      rebase/amend respectively — all installed together by
+  post-rewrite.sample       `rs-graph install-hook`
 docs/
   architecture.md
   mcp-tools.md
@@ -160,12 +168,22 @@ restart anything depends on what changed:
 
 ## Status & limitations
 
-Done: .NET, Angular, Aurelia, and Python indexers; incremental `watch`; 14 single-repo MCP tools
-plus 4 cross-repo workspace tools (sync API calls via NSwag `[RouteUrl]`, Azure Service Bus
-messaging, SignalR — see [docs/mcp-tools.md](docs/mcp-tools.md#cross-repo-workspace-tools));
-automatic `.mcp.json` registration on `index`/`index-workspace` (no manual server setup step); a
-`post-merge` git hook (`install-hook`/`install-hook-workspace`) that re-indexes in the background
-after `git pull` (see [docs/mcp-tools.md](docs/mcp-tools.md#keeping-the-graph-fresh-on-git-pull));
+Done: .NET, Angular, Aurelia, and Python indexers; incremental `watch`/`watch-workspace` (handles
+edits, new files, and deletions alike, safely alongside the git hook — see
+[docs/mcp-tools.md](docs/mcp-tools.md#watching-for-local-changes)); 14 single-repo MCP tools
+plus 4 cross-repo workspace tools, served from a self-refreshing in-memory index so a long-lived
+`serve-workspace` process picks up a repo re-indexed while it's running, no restart needed (sync
+API calls via NSwag `[RouteUrl]`, a raw C# `HttpClient` call, or an Angular `HttpClient` call —
+matched by route *shape*, not parameter name, so a hand-written call's own local variable name
+doesn't need to match the route's declared one — plus Azure Service Bus messaging and SignalR;
+see [docs/mcp-tools.md](docs/mcp-tools.md#cross-repo-workspace-tools)); a committed, per-repo
+`CROSS_REPO_MANIFEST.md`/`.json` (`rs-graph generate-manifest`) so a repo-scoped PR reviewer (e.g.
+in CI, with no other repos checked out) still has cross-repo context — see
+[docs/mcp-tools.md](docs/mcp-tools.md#pr-review-manifest); automatic `.mcp.json` registration on
+`index`/`index-workspace` (no manual server setup step); git hooks
+(`install-hook`/`install-hook-workspace`) that re-index in the background after a pull, branch
+switch, or rebase/amend (see
+[docs/mcp-tools.md](docs/mcp-tools.md#keeping-the-graph-fresh-across-git-pull-branch-switches-and-rebases));
 secret redaction; a "never shells out to a build/package-manager command" regression test.
 
 Not done yet:
@@ -183,6 +201,11 @@ Not done yet:
   registers the same template under more than one verb returns every candidate rather than
   disambiguating (see `SymbolGraphBuilder.EmitSignalREdges`'s sibling, the sync-API pass, in
   `packages/indexer-dotnet/src/SymbolGraphBuilder.cs`).
+- Raw HTTP call detection covers `HttpClient.GetAsync`/`PostAsync`/`PutAsync`/`DeleteAsync`/
+  `PatchAsync` (C#) and Angular `HttpClient.get`/`post`/`put`/`delete`/`patch` (TS) with a literal
+  or simply-interpolated URL — not `HttpClient.SendAsync` (verb comes from an `HttpRequestMessage`
+  argument, not the method name), and not a URL built from string concatenation or a variable
+  computed elsewhere (skipped rather than guessed at).
 - None of the three indexers are incremental at the parse/compile level — `rs-graph index`
   always fully re-scans/re-compiles the whole repo; only the database write skips unchanged files
   (see `ingest.ts`'s content-hash check). This is why the post-merge hook above runs detached

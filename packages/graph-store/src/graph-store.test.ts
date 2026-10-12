@@ -428,6 +428,11 @@ describe("graph-store", () => {
 
   it("replaces a changed file's symbols/edges but leaves unchanged files alone", () => {
     const updated: GraphRecord[] = [
+      // A same-language batch is always a full rescan of that language — unchanged files must be
+      // re-listed here too, or ingest.ts's deletion handling would treat them as removed from disk.
+      { record: "file", path: "src/IFoo.cs", language: "csharp", contentHash: "h1", sizeBytes: 10 },
+      { record: "file", path: "src/Foo.cs", language: "csharp", contentHash: "h2", sizeBytes: 20 },
+      { record: "file", path: "src/Startup.cs", language: "csharp", contentHash: "h4", sizeBytes: 15 },
       { record: "file", path: "src/Bar.cs", language: "csharp", contentHash: "h3-changed", sizeBytes: 31 },
       {
         record: "symbol",
@@ -453,6 +458,28 @@ describe("graph-store", () => {
     expect(getFileOutline(db, "src/Foo.cs").symbols.map((s) => s.id)).toEqual(["Foo", "Foo.baseMethod", "Foo.doWork"]);
   });
 
+  it("purges a file's rows when it's deleted from disk (absent from a full same-language rescan)", () => {
+    // Each indexer rescans its whole target on every run, so a deleted src/Bar.cs simply never
+    // appears in the next csharp batch at all — unlike an edit, there's no contentHash to compare.
+    const csharpRescanWithoutBar: GraphRecord[] = [
+      { record: "file", path: "src/IFoo.cs", language: "csharp", contentHash: "h1", sizeBytes: 10 },
+      { record: "file", path: "src/Foo.cs", language: "csharp", contentHash: "h2", sizeBytes: 20 },
+      { record: "file", path: "src/Startup.cs", language: "csharp", contentHash: "h4", sizeBytes: 15 },
+    ];
+    const result = ingestGraphRecords(db, csharpRescanWithoutBar);
+    expect(result.filesDeleted).toBe(1);
+
+    expect(getSymbolById(db, "Bar")).toBeUndefined();
+    expect(getSymbolById(db, "Bar.doStuff")).toBeUndefined();
+    expect(getSymbolById(db, "Route.GetBar")).toBeUndefined();
+    expect(getCallers(db, "Foo.baseMethod")).toHaveLength(0); // Bar.doStuff was its only caller
+    expect(getStats(db).totalFiles).toBe(4); // 5 - Bar.cs
+
+    // Untouched csharp file, and the typescript file this batch never mentioned, both survive.
+    expect(getFileOutline(db, "src/Foo.cs").symbols.map((s) => s.id)).toEqual(["Foo", "Foo.baseMethod", "Foo.doWork"]);
+    expect(getSymbolById(db, "AppComponent")).toBeDefined();
+  });
+
   it("dedupes a symbol id that appears as both an owned declaration and an external stub", () => {
     // Mirrors a real cross-project collision (seen indexing a multi-project .NET solution):
     // one project defines a type in source, a sibling project in the same solution only sees
@@ -460,6 +487,10 @@ describe("graph-store", () => {
     // point of view — treats it as external. Both compute the same id. Without dedup this
     // violates Symbol.id's PRIMARY KEY and the whole ingest batch fails.
     const withCollision: GraphRecord[] = [
+      { record: "file", path: "src/IFoo.cs", language: "csharp", contentHash: "h1", sizeBytes: 10 },
+      { record: "file", path: "src/Foo.cs", language: "csharp", contentHash: "h2", sizeBytes: 20 },
+      { record: "file", path: "src/Bar.cs", language: "csharp", contentHash: "h3", sizeBytes: 30 },
+      { record: "file", path: "src/Startup.cs", language: "csharp", contentHash: "h4", sizeBytes: 15 },
       { record: "file", path: "src/Shared.cs", language: "csharp", contentHash: "hc1", sizeBytes: 10 },
       { record: "file", path: "external:Shared.Package", language: "csharp", contentHash: "hc2", sizeBytes: 0 },
       {

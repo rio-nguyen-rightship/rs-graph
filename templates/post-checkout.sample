@@ -1,0 +1,23 @@
+#!/bin/sh
+# rs-graph post-checkout hook — re-indexes this repo's graph after a branch switch (or the initial
+# checkout from `git clone`), so the MCP tools stay current without a manual `rs-graph index` step.
+# See post-merge.sample for why this backgrounds the reindex and always exits 0 — same reasoning
+# applies here unchanged.
+#
+# Install: run `rs-graph install-hook` (or `rs-graph install-hook-workspace <workspace.json>` for
+# every repo in a workspace at once) — see docs/mcp-tools.md. Or install manually: copy this file
+# to .githooks/post-checkout, `chmod +x` it, and run `git config core.hooksPath .githooks`.
+
+# git passes 1 for a real branch checkout, 0 for a single-file checkout (e.g. `git checkout --
+# path/to/file`, common mid-conflict-resolution) — only the former actually changes what the whole
+# repo looks like, so only that case is worth a full reindex.
+[ "$3" = "1" ] || exit 0
+
+command -v rs-graph >/dev/null 2>&1 || exit 0
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+mkdir -p "$repo_root/.rs-graph" 2>/dev/null
+
+nohup rs-graph index "$repo_root" >>"$repo_root/.rs-graph/hooks.log" 2>&1 &
+
+exit 0

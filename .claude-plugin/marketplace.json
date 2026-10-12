@@ -1,0 +1,13 @@
+{
+  "name": "rs-graph",
+  "description": "rs-graph: structural code graph served to Claude Code over MCP.",
+  "owner": { "name": "RightShip" },
+  "plugins": [
+    {
+      "name": "rs-graph",
+      "source": "./plugin",
+      "description": "Structural code graph (callers, references, impact, routes, cross-repo) served over MCP, auto-built at session start.",
+      "author": { "name": "RightShip" }
+    }
+  ]
+}

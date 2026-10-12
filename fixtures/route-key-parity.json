@@ -1,0 +1,6 @@
+[
+  { "input": "api/v1/vessel/{id}", "expectedKey": "xrepo:route:api/v1/vessel/{}" },
+  { "input": "/api/v1/Vessel/GetVesselHeader/{vesselId}/", "expectedKey": "xrepo:route:api/v1/vessel/getvesselheader/{}" },
+  { "input": "api/v1/vessel/{vesselId}/section/{sectionId}", "expectedKey": "xrepo:route:api/v1/vessel/{}/section/{}" },
+  { "input": "api/Greeting", "expectedKey": "xrepo:route:api/greeting" }
+]

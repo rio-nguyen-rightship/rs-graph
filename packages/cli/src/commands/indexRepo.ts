@@ -11,11 +11,13 @@ import {
   AngularEnricher,
   ArraySink,
   AureliaEnricher,
+  HttpClientEnrichment,
   TsGraphBuilder,
   findTsConfig,
   loadProgram,
 } from "@rs-graph/indexer-typescript";
 import { detectProjects, type ProjectDetection } from "../detect.js";
+import { extractDotnetStats, writeIndexReport, type DotnetIndexStats } from "../indexReport.js";
 import { ensureMcpServerEntry } from "../mcpConfig.js";
 
 /**
@@ -43,7 +45,11 @@ function findDotnetIndexerDll(): string | undefined {
   return undefined;
 }
 
-function runDotnetIndexer(dllPath: string, targetPath: string, repoRoot: string): Promise<GraphRecord[]> {
+function runDotnetIndexer(
+  dllPath: string,
+  targetPath: string,
+  repoRoot: string,
+): Promise<{ records: GraphRecord[]; stats?: DotnetIndexStats }> {
   return new Promise((resolve, reject) => {
     const child = spawn("dotnet", [dllPath, targetPath, repoRoot], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -52,17 +58,19 @@ function runDotnetIndexer(dllPath: string, targetPath: string, repoRoot: string)
     child.stderr.on("data", (chunk: Buffer) => (stderr += chunk));
     child.on("error", reject);
     child.on("close", (code) => {
-      if (stderr.trim()) console.error(stderr.trim());
+      const { stats, rest } = extractDotnetStats(stderr);
+      if (rest) console.error(rest);
       if (code !== 0) {
         reject(new Error(`indexer-dotnet exited with code ${code}`));
         return;
       }
-      resolve(
-        stdout
+      resolve({
+        records: stdout
           .split("\n")
           .map(parseGraphRecordLine)
           .filter((r): r is GraphRecord => r !== undefined),
-      );
+        stats,
+      });
     });
   });
 }
@@ -114,6 +122,7 @@ function runTypeScriptIndexer(tsconfigPath: string, repoRoot: string): GraphReco
   new TsGraphBuilder(repoRoot, sink, externalSymbols, checker, ownedFiles, compilerOptions).process(program);
   new AngularEnricher(repoRoot, sink, checker, ownedFiles).process(program);
   new AureliaEnricher(repoRoot, sink, checker, ownedFiles).process(program);
+  new HttpClientEnrichment(repoRoot, sink, checker, ownedFiles).process(program);
   for (const record of externalSymbols.flush()) sink.write(record);
 
   return sink.records;
@@ -129,6 +138,9 @@ export interface RunIndexOptions {
    * (e.g. recovering from a database left in a bad state by an interrupted/crashed prior run,
    * or from an older, buggier version of an indexer). */
   fresh?: boolean;
+  /** Skip writing the "rs-graph" entry into the repo's .mcp.json — for callers (the Claude Code
+   * plugin) that supply their own MCP server registration. */
+  skipMcpConfig?: boolean;
 }
 
 function resolveAgainst(targetPath: string, maybeRelative: string): string {
@@ -174,7 +186,8 @@ async function indexLanguages(
   targetPath: string,
   detection: ProjectDetection,
   options: RunIndexOptions,
-): Promise<void> {
+): Promise<{ dotnet?: DotnetIndexStats }> {
+  let dotnet: DotnetIndexStats | undefined;
   for (const language of detection.languages) {
     if (language === "csharp") {
       const dllPath = findDotnetIndexerDll();
@@ -202,8 +215,15 @@ async function indexLanguages(
       }
       if (!target) continue;
       console.log(`  - csharp: indexing ${path.basename(target)}...`);
-      const records = await runDotnetIndexer(dllPath, target, targetPath);
-      console.log(`    ${JSON.stringify(ingestOrThrow(db, records))}`);
+      const result = await runDotnetIndexer(dllPath, target, targetPath);
+      dotnet = result.stats;
+      console.log(`    ${JSON.stringify(ingestOrThrow(db, result.records))}`);
+      if (result.stats && result.stats.unresolvedReferenceErrors > 0) {
+        console.log(
+          `    warning: ${result.stats.unresolvedReferenceErrors} declaration(s) reference types the compiler ` +
+            "couldn't resolve — the repo probably isn't restored/built; run `rs-graph doctor` for details.",
+        );
+      }
     } else if (language === "typescript") {
       let tsconfigPath: string;
       if (options.tsconfigPath) {
@@ -236,6 +256,7 @@ async function indexLanguages(
       console.log(`  - ${language}: no indexer available yet — coming in a later phase.`);
     }
   }
+  return { dotnet };
 }
 
 /** Detects project type, prints a summary, and removes a stale .rs-graph/ if --fresh was passed.
@@ -267,8 +288,10 @@ export async function runIndex(targetPath: string, options: RunIndexOptions = {}
 
   const dbPath = path.join(targetPath, ".rs-graph", "graph.db");
   const db = openGraphDb({ dbPath });
+  const startedAt = new Date().toISOString();
   try {
-    await indexLanguages(db, targetPath, prepared.detection, options);
+    const { dotnet } = await indexLanguages(db, targetPath, prepared.detection, options);
+    writeIndexReport(targetPath, { startedAt, languages: [...prepared.detection.languages], dotnet });
   } catch (err) {
     if (err instanceof DuplicateSymbolIdError) {
       console.error(`\n  - ingest failed: ${err.message}\n`);
@@ -280,6 +303,7 @@ export async function runIndex(targetPath: string, options: RunIndexOptions = {}
     closeGraphDb(db);
   }
 
+  if (options.skipMcpConfig) return;
   const mcpResult = ensureMcpServerEntry(targetPath, "rs-graph", { command: "rs-graph", args: ["serve", "."] });
   if (mcpResult === "added") {
     console.log('  .mcp.json: added "rs-graph" server entry.');
@@ -308,9 +332,11 @@ export async function runIndexForWorkspace(
 
   const dbPath = path.join(targetPath, ".rs-graph", "graph.db");
   let db: GraphDb | undefined;
+  const startedAt = new Date().toISOString();
   try {
     db = openGraphDb({ dbPath });
-    await indexLanguages(db, targetPath, prepared.detection, options);
+    const { dotnet } = await indexLanguages(db, targetPath, prepared.detection, options);
+    writeIndexReport(targetPath, { startedAt, languages: [...prepared.detection.languages], dotnet });
     return { status: "ok", languages: [...prepared.detection.languages] };
   } catch (err) {
     return { status: "failed", error: err instanceof Error ? err.message : String(err) };
